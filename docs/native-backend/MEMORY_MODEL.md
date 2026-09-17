@@ -156,24 +156,31 @@ What is **not** a significant steady-state cost (evidence): `docs/ops/VM_DEPLOYM
 
 ## 3. Existing memory/performance tooling (use it, don't reinvent it)
 
-| Tool                     | Command                                                                                                                           | What it actually measures                                                        | Memory relevance                           |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------ |
-| request-body heap bench  | `npm run bench:heap-body` (`node --expose-gc --import tsx/esm scripts/perf/request-body-heap.ts [--json] [--max-retained-mib N]`) | V8 retained heap after ×4 `gc()` per clone mechanism on the #7847 corpus         | Direct: per-target body-copy cost          |
-| deterministic corpus     | `scripts/perf/agentPayloadCorpus.ts` (+ `tests/unit/heap-benchmark-corpus.test.ts`)                                               | LCG corpus, `INCIDENT_SHAPE={729 msgs, 86 tools, 527 …}`                         | Repro for the above                        |
-| routing-events bench     | `npm run bench:routing-events` (`scripts/perf/routing-events-bench.ts`)                                                           | `perf_hooks` µs/op + ops/s for factor calc + event dispatch + OTel enqueue       | Event-overhead ceiling                     |
-| compression bench        | `npm run bench:compression` (`bun scripts/compression/benchmark.ts`)                                                              | token savings/retention per engine on fixed corpus                               | Quality/cost, **not** RAM                  |
-| compression budget gate  | `npm run check:compression-budget` (+ `compression-budget-baseline.json`, 2% tolerance)                                           | tokens/task vs baseline                                                          | Guards against prompt bloat (indirect RAM) |
-| heap leak gate           | `npm run test:heap` (`tests/integration/heap-growth.test.ts`)                                                                     | heap growth over 500 SSE streams (<20 MB)                                        | Direct: stream-path leaks                  |
-| video-bridge benches     | `scripts/perf/video-bridge-{bench,fu07-eval,contact-sheet-eval,promotion-eval}.ts`                                                | `memoryUsage/maxRSS/cpu/latency`, `ffmpeg` child `maxRssKiB` via `/usr/bin/time` | Media-path peak RSS                        |
-| bundle/size ratchets     | `npm run check:bundle-size` (+ `.size-limit.json`), `check-file-size.mjs`                                                         | gzip bytes vs `quality-baseline.json`                                            | Code size, not RSS                         |
-| router/compression evals | `npm run eval:router*`, `npm run eval:compression`                                                                                | AIQ/cost/latency, quality/cost/save (spend-gated)                                | Regression context                         |
-| pressure probes          | `open-sse/utils/{heapPressure,resourcePressure*}.ts`, `chatBodyAdmission.ts`                                                      | live `heapUsed/limit`, cgroup/PSI                                                | Runtime guard behavior                     |
-| `wtfnode@0.10.1`         | devDependency, no wired script                                                                                                    | open handles on demand                                                           | Leak debugging                             |
+| Tool                       | Command                                                                                                                            | What it actually measures                                                                                  | Memory relevance                            |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| request-body heap bench    | `npm run bench:heap-body` (`node --expose-gc --import tsx/esm scripts/perf/request-body-heap.ts [--json] [--max-retained-mib N]`)  | V8 retained heap after ×4 `gc()` per clone mechanism on the #7847 corpus                                   | Direct: per-target body-copy cost           |
+| deterministic corpus       | `scripts/perf/agentPayloadCorpus.ts` (+ `tests/unit/heap-benchmark-corpus.test.ts`)                                                | LCG corpus, `INCIDENT_SHAPE={729 msgs, 86 tools, 527 …}`                                                   | Repro for the above                         |
+| routing-events bench       | `npm run bench:routing-events` (`scripts/perf/routing-events-bench.ts`)                                                            | `perf_hooks` µs/op + ops/s for factor calc + event dispatch + OTel enqueue                                 | Event-overhead ceiling                      |
+| compression bench          | `npm run bench:compression` (`bun scripts/compression/benchmark.ts`)                                                               | token savings/retention per engine on fixed corpus                                                         | Quality/cost, **not** RAM                   |
+| compression budget gate    | `npm run check:compression-budget` (+ `compression-budget-baseline.json`, 2% tolerance)                                            | tokens/task vs baseline                                                                                    | Guards against prompt bloat (indirect RAM)  |
+| heap leak gate             | `npm run test:heap` (`tests/integration/heap-growth.test.ts`)                                                                      | heap growth over 500 SSE streams (<20 MB)                                                                  | Direct: stream-path leaks                   |
+| video-bridge benches       | `scripts/perf/video-bridge-{bench,fu07-eval,contact-sheet-eval,promotion-eval}.ts`                                                 | `memoryUsage/maxRSS/cpu/latency`, `ffmpeg` child `maxRssKiB` via `/usr/bin/time`                           | Media-path peak RSS                         |
+| bundle/size ratchets       | `npm run check:bundle-size` (+ `.size-limit.json`), `check-file-size.mjs`                                                          | gzip bytes vs `quality-baseline.json`                                                                      | Code size, not RSS                          |
+| router/compression evals   | `npm run eval:router*`, `npm run eval:compression`                                                                                 | AIQ/cost/latency, quality/cost/save (spend-gated)                                                          | Regression context                          |
+| pressure probes            | `open-sse/utils/{heapPressure,resourcePressure*}.ts`, `chatBodyAdmission.ts`                                                       | live `heapUsed/limit`, cgroup/PSI                                                                          | Runtime guard behavior                      |
+| `wtfnode@0.10.1`           | devDependency, no wired script                                                                                                     | open handles on demand                                                                                     | Leak debugging                              |
+| reference-backend baseline | `npm run bench:reference-baseline` (`node scripts/perf/baseline/reference-backend-baseline.mjs --runs 3 --port 21138 --out <dir>`) | External `/proc` RSS/peak-RSS/threads/FDs across startup → idle → 5-min idle → `GET /v1/models` → recovery | Direct: the Task 002 measured baseline (§7) |
 
 Not present: `clinic`, `autocannon`, `k6` configs, Lighthouse (only nightly
 mention in `docs/ops/QUALITY_GATE_PLAYBOOK.md:85,159` and unrelated string
-hits). `bench:highwatermark` is dangling (target file missing on disk —
-verify before use).
+hits). `bench:highwatermark`: **confirmed dangling (Task 002)** — the
+`package.json:99` target references a `benchmark-highwatermark.ts` file under
+`scripts/perf/` which does not exist; the script line was added without its
+file in upstream commit `e2e330a05` (package.json-only change, no file under
+`scripts/perf/` in that commit), it is not generated, and no same-purpose
+file exists under another name (other `highWaterMark` hits are stream buffer
+options). Pre-existing upstream omission; do not cite it as runnable.
+(Full verification commands in §7.8.)
 
 ---
 
@@ -340,4 +347,165 @@ recovery RSS: …  VmHWM: …  Threads: …  FDs: …
 
 ---
 
+## 7. Measured baseline (Task 002, 2026-09-17) **[measured]**
+
+> Provenance rule for this section: every number in §7.1–§7.5 is a **measured
+> value** from 3 clean runs of `npm run bench:reference-baseline` on the
+> machine in §7.2. Everything else in this document keeps its original
+> provenance — §1–§2 constants are **source-derived expectations**, §5 budgets
+> are **design targets (estimates)**, and §7.6 lists **unmeasured workloads**.
+> Do not quote §5 budget numbers as measurements, and do not quote §7 numbers
+> as guarantees for other machines, modes, or revisions.
+
+### 7.1 Reproduction
+
+```bash
+npm run bench:reference-baseline -- --runs 3 --port 21138 --out /tmp/omniroute-baseline/<stamp>
+```
+
+What the tool does (external measurement only — no production code is
+touched, nothing is injected into the server):
+
+1. Spawns `node --max-old-space-size=8192 scripts/dev/run-next.mjs dev`
+   (the same command `npm run dev` uses) with a fresh per-run `DATA_DIR`,
+   random per-run `JWT_SECRET` / `API_KEY_SECRET` / `INITIAL_PASSWORD`,
+   and operator secrets blanked. The server PID is tracked directly from
+   `spawn()` — never matched by process name.
+2. Waits deterministically: liveness `GET /api/health` → readiness
+   `GET /api/health/ping`, with a finite deadline; premature server exit is
+   detected at every phase and reported as `measurement_failure` (distinct
+   from HTTP `request_failure`). Missing samples are recorded as `null`,
+   never zero.
+3. Samples Linux `/proc/<pid>/status` (`VmRSS`, `VmHWM`, `Threads`) and
+   `/proc/<pid>/fd` at each phase; polls VmRSS every 50 ms while
+   `GET /v1/models` is in flight for the workload peak. Descendant PIDs are
+   discovered via `/proc/*/stat` and reported **separately** as an explicitly
+   labeled aggregate (shared pages double-count, so it is an upper bound).
+4. Provisions a real client API key through the product's own flow
+   (initial-password login → dashboard session → `GET /api/auth/csrf` →
+   `POST /api/keys`); no credentials are fabricated and no key material is
+   written to artifacts. A `503 catalog_build_timeout` (see
+   `src/app/api/v1/models/catalogCache.ts`) is retried once after the
+   advertised `Retry-After`, as a representative client would.
+5. Cleans up with `SIGTERM` → `SIGKILL` on the spawned PID and its
+   starttime-verified descendants only, then verifies no leftovers remain.
+
+Timings per run: readiness → 60 s stabilize → 300 s real idle (not
+extrapolated) → models workload → 60 s recovery. About 8–10 minutes per run.
+
+### 7.2 Environment (recorded by the tool, `summary.json:meta`)
+
+- git commit: `b6c226515479c1407f40e87375dc5f93ccc3374b`
+- OmniRoute version: `3.8.51` (`package.json`)
+- OS / kernel / arch: Linux `7.2.4-zen2-1-zen`, x64, 8 CPUs, ~16 GiB RAM
+- Node `v26.8.2`, npm `12.0.2`
+- Run mode: **dev** (`scripts/dev/run-next.mjs dev`,
+  `--max-old-space-size=8192`) — not production standalone
+- `OMNIROUTE_MEMORY_MB`: unset; `NODE_OPTIONS`: unset
+- No secrets recorded.
+
+### 7.3 Metric semantics
+
+- `RSS` = `VmRSS` of the server PID: whole-process resident set including
+  shared mappings. **Not** V8 heap — do not compare with `bench:heap-body`
+  or `heap-growth` numbers.
+- `peak RSS` = `VmHWM` of the server PID: kernel lifetime high-water mark.
+  It includes the first-boot Turbopack compile (§7.5), so it is a boot-peak
+  bound, not a steady-state bound.
+- `workload peak` = max VmRSS polled at 50 ms while the models request (plus
+  a documented single retry, if any) is in flight.
+- `threads` = `Threads:` count; `fds` = entries in `/proc/<pid>/fd`.
+- `tree aggregate` = sum of descendant VmRSS, labeled `AGGREGATE`.
+
+### 7.4 Results (MiB; individual samples run-1 / run-2 / run-3)
+
+| Phase                                    | Run 1  | Run 2  | Run 3  | Min    | Median | Max    |
+| ---------------------------------------- | ------ | ------ | ------ | ------ | ------ | ------ |
+| Startup, 2 s after spawn (pre-readiness) | 101.6  | 340.0  | 93.9   | 93.9   | 101.6  | 340.0  |
+| Startup, at readiness                    | 967.1  | 873.2  | 885.1  | 873.2  | 885.1  | 967.1  |
+| Initial idle (ready + 60 s)              | 838.8  | 789.4  | 746.3  | 746.3  | 789.4  | 838.8  |
+| Idle after 5 min (real 300 s wait)       | 422.5  | 788.4  | 715.1  | 422.5  | 715.1  | 788.4  |
+| Pre-`/v1/models`                         | 422.5  | 788.4  | 715.1  | 422.5  | 715.1  | 788.4  |
+| `/v1/models` workload peak               | 729.1  | 962.4  | 876.2  | 729.1  | 876.2  | 962.4  |
+| Post-`/v1/models`                        | 729.2  | 963.4  | 856.2  | 729.2  | 856.2  | 963.4  |
+| Recovery (models + 60 s)                 | 671.1  | 963.5  | 855.8  | 671.1  | 855.8  | 963.5  |
+| Lifetime VmHWM (boot compile included)   | 2086.5 | 2050.0 | 1998.2 | 1998.2 | 2050.0 | 2086.5 |
+
+`/v1/models` request detail (all `200 OK`, authenticated with a provisioned
+key, body `214663` bytes each run): wall `1932 / 2453 / 3935` ms
+(min / median / max). TTFB ≈ wall (single JSON body). No `503` retry was
+needed on any run.
+
+Derived deltas (informational, n=3 — no claim of significance):
+
+- Request cost (post − pre): `+306.7 / +175.0 / +141.1` MiB.
+- 60 s retention (recovery − pre): `+248.6 / +175.1 / +140.7` MiB — the
+  catalog response memory is still resident 60 s later in all runs.
+- 60 s release (recovery − post): `−58.1 / ~0 / ~0` MiB.
+
+Outliers are kept, not hidden: run-1 released ~416 MiB during the 5-minute
+idle (838.8 → 422.5) while runs 2–3 stayed flat; run-2 sampled 340 MiB at
+2 s after spawn (warm Turbopack disk cache → faster boot, liveness in
+176 ms vs 2079 ms / 908 ms). With n=3, treat the idle-5-min spread
+(422–788 MiB) as idle-GC timing variance, not as two populations.
+
+### 7.5 Threads, FDs, children, DATA_DIR
+
+- Threads at recovery: `22 / 22 / 22`. FDs at recovery: `47 / 47 / 47`.
+  (Boot transient: 24–25 threads / 53–55 FDs at readiness, settling to 22/47.)
+- Exactly one child process in every sample: `esbuild` (Next dev
+  transpiler service), 3–13 MiB RSS. Tree aggregate is 3–13 MiB in all
+  samples — negligible next to the ~700–990 MiB main process, and always
+  reported separately, never mixed into the main-process numbers.
+- Fresh per-run `DATA_DIR` settled at ~6.1 MiB on disk (all runs).
+
+### 7.6 Workloads NOT MEASURED (and why)
+
+- Normal/streaming chat completion, `/v1/responses`, large Codex-shape
+  request over HTTP, compression over HTTP, MCP/A2A over HTTP: all need a
+  configured (and usually billable) upstream provider. Fabricating provider
+  responses to obtain completion measurements is explicitly out of scope —
+  that would be provider integration testing, not a memory baseline.
+- V8-heap side of the large-request shape is covered separately by
+  `npm run bench:heap-body` (heap, not RSS — not comparable to §7.4).
+- Production standalone mode (`npm start`): not measured. The §7 numbers
+  are dev-mode numbers (Turbopack + `esbuild` child resident); expect
+  standalone to differ.
+
+### 7.7 Relation to the cited `200–400 MB` statement
+
+`docs/ops/VM_DEPLOYMENT_GUIDE.md:432-435` reports idle `200–400 MB` RSS at
+`OMNIROUTE_MEMORY_MB=512` — that provenance is unchanged: it is a
+**cited production-standalone deployment note, not a Task 002 measurement**.
+It is not contradicted by §7.4 (dev mode, unset memory cap, 8 GiB heap
+allowance, dev compiler resident) and it is not confirmed by §7.4 either.
+A standalone-mode baseline on comparable hardware is future work.
+
+### 7.8 Status of the previously reported `bench:highwatermark` issue
+
+Confirmed precisely in Task 002: the `bench:highwatermark` target in
+`package.json` references a benchmark file under `scripts/perf/` which has
+never existed on disk — upstream commit `e2e330a05` added the script line
+(package.json-only, +1 line) without its file; no commit ever created it;
+it is not generated (no generator references it); no same-purpose file
+exists under another name (other `highWaterMark` hits are SSE/stream
+buffer-size options). Pre-existing upstream omission, unrelated to this
+task. Verify with:
+
+```bash
+grep -n "bench:highwatermark" package.json
+ls scripts/perf/benchmark-highwatermark.ts
+git show e2e330a05 -- package.json
+git log --all --oneline -S 'benchmark-highwatermark'
+```
+
+The new `bench:reference-baseline` target does not replace it (different
+purpose: server-process RSS baseline vs the unknown intent of the dangling
+target), so the dangling target is left untouched — not recreated, not
+removed.
+
+---
+
 _Next: MIGRATION_PLAN.md (incremental path + harness)._
+
+(End of file - total 501 lines)
