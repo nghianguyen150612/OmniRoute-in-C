@@ -400,6 +400,14 @@ files without operator approval (Review-focus rule).
    known-answer pairs during slice 2.
 6. Whether `/v1/models` requires auth in this deployment (route says
    public-readonly relax; verify live before slice 1 asserts it).
+   → **Resolved by Task 003** (see `contracts/v1-models.contract.json` +
+   FEATURE_PARITY §1 Task 003 note): two layers — pipeline anonymous iff
+   `REQUIRE_API_KEY=false` (default), else `401 AUTH_002`; route requires a
+   key/session iff any credential is configured (else open via
+   `requireLogin=false`, the fresh-install `/api/v1/*` public prefix, or
+   `requireAuthForModels=false`), else route-shape `401 invalid_api_key`.
+   Live-verified on isolated boots (default + `REQUIRE_API_KEY=true` +
+   `CHANGEME`-bootstrap).
 7. `bench:highwatermark` target missing — restore or drop before citing it.
 8. Counts that drift: re-run ARCHITECTURE §0 commands per slice PR.
 

@@ -45,6 +45,52 @@
 | VSCode token paths                                        | `src/app/api/v1/vscode/[token]/*`, `.../raw/[token]/*`, `.../combos/[token]/[[...slug]]`                                                                                    | token-in-path variants of chat/models/combos                                                                                              | same as wrapped                                            | token lookup cache                                           | none extra                                                                                     | same as wrapped                                                              | none                         | `tests/unit/vscode*.test.ts`                                                        | NOT STARTED |
 | Catch-all JSON 404                                        | `src/app/api/[...omnirouteApiCatchAll]/route.ts`, `src/app/api/v1/[...omnirouteCatchAll]/route.ts`                                                                          | any unmatched `/api/*`, `/anthropic/*`, `/openai/*`                                                                                       | none                                                       | none                                                         | none                                                                                           | none                                                                         | none                         | `tests/unit/*catch-all*.test.ts` (#6424)                                            | NOT STARTED |
 
+### Task 003 — `GET /v1/models` reference contract (verified 2026-09-17, ref `0df0619c1`)
+
+Machine-readable fixture: `docs/native-backend/contracts/v1-models.contract.json`
+(source of truth for the harness; the prose below is a summary).
+
+- **Path**: `GET /v1/models` + alias `GET /models` (rewrites → `/api/v1/models`,
+  `next.config.mjs:719-741`); proxy class `CLIENT_API`
+  (`src/server/authz/classify.ts`, `src/proxy.ts`). Single-model
+  `GET /v1/models/[...model]` is a separate route (`modelById.ts`) — out of scope.
+- **Execution**: `route.ts:GET` → `getUnifiedModelsResponse()` (`catalog.ts:192`)
+  → per-request route auth (`catalogRequest.ts`) → `resolveCachedCatalogResponse()`
+  (`catalogCache.ts`: coalesce + TTL memo + stale-while-revalidate via `after()`)
+  → `buildUnifiedModelsResponseCore()` (auto/combo → static → codex-native →
+  synced → OpenRouter → specialty → custom → alias-backed → fallback loops) →
+  per-key filter → `applyCatalogPostFilters` → `finalizeCatalogResponse`
+  (enrich → `dedupeExactCatalogIds` → `sortCatalogModelsProviderGrouped` →
+  `limit`/`after` page → `catalogJsonResponse` with `content-length`).
+- **Success**: `200 application/json`, envelope `{object:"list",data:[...]}`
+  (`has_more`/`last_id` only when paged; `models:[]` only for Codex-UA/originator
+  clients). Entry keys `id/object/created/owned_by` are universal;
+  `permission` (always `[]` when present) and `root` are **absent on
+  specialty-registry rows** (embedding/image/rerank/audio/moderation/video/music).
+  Order: combo block first, then provider-grouped by `owned_by` (stable within
+  group — no global alpha sort). First-wins dedupe on `(id,type,subtype)`.
+- **Auth (two layers, two 401 shapes)**: pipeline allows anonymous iff
+  `REQUIRE_API_KEY=false` (default) — else `401 AUTH_002 {code,message,
+correlation_id}`; route then requires key/session iff credentials are
+  configured (else open: `requireLogin=false`, fresh-install `/api/v1/*` public
+  prefix, or `requireAuthForModels=false`) — else `401 {message,type:
+"invalid_api_key",code:"invalid_api_key"}` (`Authentication required` vs
+  `Invalid API key`). Malformed schemes (`Bearer` alone, `Token …`) count as
+  anonymous. Query-string `?token=` removed (#3300); `x-api-key` only with
+  Anthropic signals. Live-verified on isolated boots (default + `REQUIRE_API_KEY
+=true` + `CHANGEME`-bootstrap); truly-passwordless loopback-open covered by
+  source gates + `models-catalog-route.test.ts`.
+- **Errors**: `401` ×2 shapes above; `503 catalog_build_timeout` + `Retry-After`
+  (cold-build bound `CATALOG_BUILD_TIMEOUT_MS`, default 8s; `x-omniroute-catalog:
+build-timeout`, `last-good` fallback variant); `500 INTERNAL_PROXY_ERROR`
+  sanitized. `HEAD → 200` empty (pipeline-gated when key required); `OPTIONS →
+204` preflight.
+- **State**: reads settings/connections(nodes)/combos/custom+hidden+alias maps/
+  synced models/models.dev caps+pricing/api_keys; in-memory catalog memo +
+  5s/30s readCache TTLs + key LRU; post-response work is `after()` refresh only
+  (+ cc-discovery counter). No upstream fetch on this path (OpenRouter/Horde
+  refresh only when those providers are active).
+
 ## 2. Provider layer (358 providers)
 
 | Feature                                   | TS path                                                                                                                                                                                   | API                                                            | P                                                | M                                                    | EXT                             | STR                                     | Platform                             | Tests                                                          | C status    |

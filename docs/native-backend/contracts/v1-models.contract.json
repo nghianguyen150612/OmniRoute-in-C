@@ -1,0 +1,216 @@
+{
+  "$schema": "omniroute-native-contract/v1",
+  "contract": "GET /v1/models reference contract (Task 003)",
+  "reference": {
+    "repo": "OmniRoute-in-C",
+    "commit": "0df0619c1",
+    "version": "3.8.51",
+    "verified": "2026-09-17",
+    "method": "unit-tests + live isolated dev-server probes (3 boots, temp DATA_DIR, ports 21151-21153)"
+  },
+  "request": {
+    "method": "GET",
+    "canonicalPath": "/api/v1/models",
+    "publicPaths": ["/v1/models", "/models"],
+    "rewrite": "/models -> /api/v1/models; /v1/:path* -> /api/v1/:path* (next.config.mjs)",
+    "proxyClass": "CLIENT_API",
+    "queryParams": {
+      "limit": "positive int, clamped to 10000; missing/invalid => full list",
+      "after": "model id cursor; unknown id => start at 0",
+      "prefix": "'alias'|'canonical'|'dual' (query wins) else MODELS_CATALOG_PREFIX_MODE flag (default dual)",
+      "configuredOnly": "'true' => keep only models with an eligible DB connection",
+      "client_version": "opaque; only signals Codex CLI refresh (shape change is header-driven, not param-driven)"
+    }
+  },
+  "success": {
+    "status": 200,
+    "contentType": "application/json",
+    "contentLength": "always set (bytes of JSON body)",
+    "envelope": { "object": "list", "data": "[model entries in catalog order]" },
+    "pagedEnvelopeAdds": ["has_more", "last_id"],
+    "codexClientAdds": {
+      "models": "empty array, ONLY when originator^=codex* or user-agent^=codex*"
+    },
+    "entryFields": {
+      "alwaysPresent": {
+        "id": "string (public id; chat rows are '<prefix>/<model>')",
+        "object": "'model'",
+        "created": "integer unix seconds, single timestamp shared by whole response",
+        "owned_by": "string (canonical provider id, node prefix, or 'combo')"
+      },
+      "usuallyPresent": {
+        "permission": "array (ALWAYS [] when present; ABSENT on specialty-registry rows: embedding/image/rerank/audio/moderation/video/music)",
+        "root": "string raw model id (absent on some specialty rows)",
+        "parent": "string|null (alias->canonical linkage; null or absent otherwise)"
+      },
+      "conditional": [
+        "name (unless MODEL_CATALOG_INCLUDE_NAMES=false)",
+        "type/subtype/api_format/supported_endpoints (non-chat surfaces)",
+        "context_length/max_input_tokens/max_output_tokens",
+        "input_modalities/output_modalities",
+        "capabilities{tool_calling,reasoning,thinking,supportsThinking,effort_tiers,vision,attachment,structured_output,temperature}",
+        "dimensions (embedding rows), supported_sizes/media_capabilities (image/video rows)",
+        "pricing/family/status/knowledge_cutoff/release_date/last_updated/open_weights (enrichment)",
+        "custom:true (operator custom-model overlay rows)"
+      ]
+    },
+    "ordering": "combo-owned rows first (auto/* then user combos), then provider-grouped by owned_by in registry precedence (OAUTH->NOAUTH->APIKEY), unknown groups by code-unit order; stable within group (NO global alpha sort; JSON key order not significant)",
+    "dedupe": "first wins per (id,type,subtype); generic chat sibling dropped when a typed specialty row shares the id; intentional audio transcription/speech pair kept",
+    "emptyCatalog": "200 with data:[] (reachable: all providers blocked/hidden, hideAutoCombos, no combos; never observed live — source-derived)"
+  },
+  "responseHeaders": {
+    "always": [
+      "content-type: application/json",
+      "content-length",
+      "x-request-id (echo or uuid)",
+      "x-model-catalog-version: model-metadata-v1:<sync|static>"
+    ],
+    "conditional": ["x-omniroute-catalog: last-good|build-timeout (cache fallback paths only)"],
+    "viaProxy": [
+      "x-omniroute-route-class: CLIENT_API",
+      "access-control-allow-origin (echo iff credentialed request or preflight; '*' iff no Origin on relaxed surface; ABSENT for credential-less GET — fail-closed)",
+      "vary: Origin, Accept-Encoding (+ next internals)"
+    ]
+  },
+  "auth": {
+    "layers": [
+      "proxy CLIENT_API policy (pipeline)",
+      "route getModelCatalogAuthRejection (catalogRequest.ts)"
+    ],
+    "pipeline": {
+      "allowAnonymousWhen": "no bearer AND no dashboard session AND REQUIRE_API_KEY=false (default)",
+      "rejectAnonymous": "401 {error:{code:AUTH_002,message:'Authentication required',correlation_id}} (16ms live, no catalog headers)",
+      "rejectInvalidKey": "401 AUTH_002 'Invalid API key' (invalid key degrades to anonymous iff REQUIRE_API_KEY=false)",
+      "mechanisms": [
+        "Authorization: Bearer <key>",
+        "x-api-key (unconditional in pipeline)",
+        "x-goog-api-key",
+        "path token /vscode/<key>/..."
+      ]
+    },
+    "route": {
+      "openWhen": "requireLogin===false OR fresh-install public-route (/api/v1/* prefix, no password/OIDC/INITIAL_PASSWORD anywhere) OR settings.requireAuthForModels===false",
+      "rejectAnonymous": "401 {error:{message:'Authentication required',type:'invalid_api_key',code:'invalid_api_key'}} + catalog diagnostic headers",
+      "rejectInvalidKey": "401 same shape, message 'Invalid API key' (validateApiKey incl. env key OMNIROUTE_API_KEY/ROUTER_API_KEY)",
+      "malformedAreAnonymous": ["'Bearer' alone", "'Bearer ' empty", "non-Bearer scheme"],
+      "acceptedCredentialScope": "Authorization Bearer; x-api-key ONLY with anthropic-version header or claude-code/claude-cli/anthropic UA; x-goog-api-key; /vscode/<key>/ path token. Query-string ?token= etc. REMOVED (#3300)",
+      "perKeyScoping": "allowedModels/blockedModels patterns filter rows (id or root); quota-exclusive keys list ONLY qtSd/* pool models; env-key (no DB row) sees full catalog"
+    }
+  },
+  "errors": [
+    {
+      "case": "pipeline anonymous (REQUIRE_API_KEY=true)",
+      "status": 401,
+      "shape": "{error:{code,message,correlation_id}}",
+      "origin": "proxy"
+    },
+    {
+      "case": "pipeline invalid key (REQUIRE_API_KEY=true)",
+      "status": 401,
+      "shape": "AUTH_002 'Invalid API key'",
+      "origin": "proxy"
+    },
+    {
+      "case": "route anonymous (credentials configured)",
+      "status": 401,
+      "shape": "{error:{message,type:'invalid_api_key',code:'invalid_api_key'}}",
+      "origin": "route"
+    },
+    {
+      "case": "route invalid key",
+      "status": 401,
+      "shape": "same, message 'Invalid API key'",
+      "origin": "route"
+    },
+    {
+      "case": "cold-build coalesced timeout (CATALOG_BUILD_TIMEOUT_MS, default 8000)",
+      "status": 503,
+      "shape": "buildErrorBody service_unavailable 'catalog_build_timeout'",
+      "headers": ["x-omniroute-catalog: build-timeout", "Retry-After: ceil(2*boundMs/1000)s"],
+      "origin": "catalogCache"
+    },
+    {
+      "case": "builder/DB failure",
+      "status": 500,
+      "shape": "buildErrorBody server_error INTERNAL_PROXY_ERROR (sanitized, no stack)",
+      "origin": "route/catalog"
+    }
+  ],
+  "methods": {
+    "HEAD": "200 application/json, empty body (explicit handler, #6400); gated by pipeline auth when REQUIRE_API_KEY=true (live: 401), open otherwise",
+    "OPTIONS": "204 preflight (route: Allow-Methods GET,HEAD,OPTIONS + Allow-Headers *; proxy overlays origin)"
+  },
+  "cache": {
+    "responseMemo": "Map keyed by prefix|isCodex|HMAC-fp(apiKey)|configuredOnly|hideAuto|hideNoThink|page; TTL settings.cache.modelCatalogCacheTtlMs else 60s; stale-while-revalidate 30s via after() (post-flush), errors never served stale",
+    "coalescing": "concurrent identical builds share one promise (#6408); generation-guarded against post-write joins (#12627 8s bound)",
+    "invalidation": "invalidateDbCache() bumps modelCatalogCacheVersion on settings/connections/combos/pricing/nodes/model-capability writes; readCache TTLs 5s (settings/connections/nodes) / 30s (pricing)",
+    "postResponse": "after() background refresh only; cc-discovery metric increment (fire-and-forget)"
+  },
+  "stateTouched": {
+    "persistent": [
+      "settings",
+      "provider_connections (raw, lazy-decrypt view)",
+      "provider_nodes",
+      "combos",
+      "customModels/modelCompatOverrides/hidden-models (key_value)",
+      "modelAliases",
+      "syncedAvailableModels",
+      "modelsDevSync capabilities+pricing",
+      "api_keys (auth + per-key filter)"
+    ],
+    "inMemory": [
+      "catalogCache maps (catalogCache/catalogInFlight/catalogLastGood)",
+      "TTLCache settings/pricing/connections/nodes",
+      "api-key LRU + optional Redis 1h",
+      "model permission cache",
+      "static registries (PROVIDER_MODELS/REGISTRY, lazy Proxy)"
+    ],
+    "notTouched": [
+      "no upstream fetch on this path (OpenRouter live catalog ONLY when openrouter active without synced models; AI Horde ensureFresh ONLY when aihorde active)",
+      "no writes except cc-discovery counter + last-used key stamp"
+    ]
+  },
+  "liveObservationsThisEnv": {
+    "note": "ENVIRONMENT-SPECIFIC, not requirements: fresh boot, no connections/combos",
+    "bodyBytes": 214005,
+    "dataLen": 531,
+    "permissionAbsent": 179,
+    "firstIds": ["auto/best-coding", "auto/best-reasoning", "auto/best-fast"],
+    "comboRowsFirst": 40,
+    "coldBuildWallMs": "1372-4421"
+  },
+  "provenance": {
+    "sources": [
+      "src/app/api/v1/models/route.ts",
+      "src/app/api/v1/models/catalog.ts",
+      "src/app/api/v1/models/catalogCache.ts",
+      "src/app/api/v1/models/catalogRequest.ts",
+      "src/app/api/v1/models/catalogResponse.ts",
+      "src/app/api/v1/models/catalogPagination.ts",
+      "src/app/api/v1/models/catalogOrder.ts",
+      "src/app/api/v1/models/catalogDedupe.ts",
+      "src/server/authz/pipeline.ts",
+      "src/server/authz/policies/clientApi.ts",
+      "src/server/authz/classify.ts",
+      "src/shared/constants/publicApiRoutes.ts",
+      "src/shared/utils/apiAuth.ts",
+      "src/sse/services/auth.ts",
+      "src/lib/db/apiKeys.ts",
+      "src/lib/db/readCache.ts",
+      "src/lib/db/settings.ts",
+      "src/lib/modelMetadataRegistry.ts",
+      "src/proxy.ts",
+      "next.config.mjs"
+    ],
+    "tests": [
+      "tests/unit/v1-models-auth-leak-9320.test.ts (2 pass)",
+      "tests/unit/authz/pipeline.test.ts (28 pass)",
+      "tests/unit/models-catalog-route.test.ts (cited)"
+    ],
+    "unresolved": [
+      "truly-passwordless fresh-install loopback 200 NOT live-probed (repo .env injects INITIAL_PASSWORD=CHANGEME; covered by source gates + cited unit test)",
+      "503 build-timeout + last-good fallback NOT triggered live (cold builds 1.4-4.4s < 8s bound; covered by 12627-catalog-inflight-timeout.test.ts)",
+      "empty-catalog data:[] NOT observed live (source-derived)"
+    ]
+  }
+}

@@ -369,13 +369,57 @@ output_item/delta/completed`, keepalive every 3s, `highWaterMark 16k`).
   `open-sse/utils/responsesStreamHelpers.ts`, `resolveResponsesApiModel`,
   `resolveStreamFlag`.
 
-## 8. Models APIs **[confirmed]**
+## 8. Models APIs **[confirmed — Task 003 traced `GET /v1/models` end to end]**
 
-- `GET /v1/models`, `GET /v1/models/[...model]`
-  (`src/app/api/v1/models/route.ts` + `catalog.ts`,
-  `catalogSyncedCoverage.ts`, `catalogProviderMaps.ts`,
-  `catalogCache.ts`) → `getUnifiedModelsResponse()` with `after()`
-  background refresh and `HEAD` probe support.
+- `GET /v1/models`, alias `GET /models` (rewrites `next.config.mjs:719-741` →
+  `/api/v1/models`; proxy class `CLIENT_API` via `src/proxy.ts` +
+  `src/server/authz/classify.ts`).
+- `src/app/api/v1/models/route.ts:GET` (explicit `HEAD → 200` empty-body probe,
+  #6400; `OPTIONS` preflight) → `getUnifiedModelsResponse()` with Next `after()`
+  as the background-refresh scheduler (`catalog.ts:192-253`).
+- Two auth layers, verified live: (1) pipeline `clientApiPolicy`
+  (`src/server/authz/policies/clientApi.ts:57-101`) — anonymous iff
+  `REQUIRE_API_KEY=false` (default `"false"`,
+  `src/shared/constants/featureFlagDefinitions.ts:17-26`), else `401 AUTH_002
+{code,message,correlation_id}`; (2) route `getModelCatalogAuthRejection()`
+  (`catalogRequest.ts:12-54`, driven by `isAuthRequired()` in
+  `src/shared/utils/apiAuth.ts:406-456` + `settings.requireAuthForModels`) —
+  `401 {message,type:"invalid_api_key",code:"invalid_api_key"}`. Malformed
+  `Authorization` values fall through to anonymous (`extractApiKey`,
+  `src/sse/services/auth.ts:3504-3539`; query `?token=` removed, #3300).
+- `resolveCachedCatalogResponse()` (`catalogCache.ts:409-477`): cache key
+  `prefix|isCodex|HMAC-fp(key)|configuredOnly|hideAuto|hideNoThink|page`;
+  TTL `settings.cache.modelCatalogCacheTtlMs` else 60s; 30s
+  stale-while-revalidate via `after()` post-flush; concurrent builds coalesced
+  (#6408); 8s cold-build bound → `503 catalog_build_timeout` + `Retry-After`
+  (#12627); generation-guarded against post-write joins; errors never served
+  stale. Invalidation via `modelCatalogCacheVersion`
+  (`src/lib/db/readCache.ts:256-300`).
+- Builder `buildUnifiedModelsResponseCore()` (`catalog.ts:282-2074`): settings →
+  connections (`getCachedRawProviderConnections`, lazy-decrypt view) + nodes →
+  combos (+ nested resolution) → quota-exclusive short-circuit → auto/* loop →
+  combo loop → synced map → static `PROVIDER_MODELS` loop → codex-native →
+  synced → OpenRouter (only when active w/o synced) → embedding/image/rerank/
+  audio/moderation/video/music registries → custom → alias-backed → managed
+  fallback → per-key `isModelAllowedForKey` filter → `applyCatalogPostFilters`
+  (`catalogResponse.ts`: `configuredOnly`, effort/no-thinking/cc-discovery/
+  gateway variants+mirrors, `dedupeExactCatalogIds`) → `finalizeCatalogResponse`
+  (per-entry `enrichCatalogModelEntry`, combo rows skip enrichment;
+  `sortCatalogModelsProviderGrouped` — combo block first, then registry
+  precedence, stable within group; `limit`/`after` page; `models:[]` iff Codex
+  client) → `catalogJsonResponse` (`content-type` + `content-length`, chunked
+  stream past 64 KiB).
+- Contract facts (live-verified, fresh boot): `200` envelope
+  `{object:"list",data}`; `id/object/created/owned_by` universal, `permission`
+  (`[]`) + `root` absent on specialty rows; `X-Request-Id`,
+  `X-Model-Catalog-Version: model-metadata-v1:<sync|static>` on every route
+  response; CORS origin echoed iff credentialed request/preflight on this
+  relaxed surface, absent for credential-less GET. Post-response work: `after()`
+  refresh only (+ fire-and-forget cc-discovery counter). No upstream fetch on
+  this path. Full fixture:
+  `docs/native-backend/contracts/v1-models.contract.json`.
+- `GET /v1/models/[...model]` (`[...model]/route.ts` → `modelById.ts`,
+  catch-all join for slashful ids) is a separate route — not covered by Task 003.
 - `GET /v1beta/models`, `GET /v1/muse-code/models`,
   `GET /v1/provider-plugin-manifest`, specialty catalog
   (`src/app/api/v1/_shared/specialtyCatalog.ts`).
