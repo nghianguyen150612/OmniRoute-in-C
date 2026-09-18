@@ -794,10 +794,27 @@ the data model.
    belongs to the execution stage, which owns corpus roots. Exit criteria met:
    the six §14 examples load clean; malformed fixtures fail with field paths
    (`tests/unit/compat-scenario-loader.test.ts`, 23 tests). No execution.
-2. **Observation/result types.** Typed constructors + JSON serializers for the
-   observation and result schemas; outcome-taxonomy enforcement (`status`
-   present iff `http-response`); bounded-preview helpers. Exit: unit tests over
-   golden observations (encoder round-trips, taxonomy guards).
+2. **Observation/result types — IMPLEMENTED (Task 007).** Runtime model in
+   `native/compat/observation.ts` (discriminated observation union with
+   `status` required on `http-response` and forbidden otherwise by type,
+   per-outcome factories, header-name lowercasing at construction with
+   repeats/order preserved, canonical-schema validator) and
+   `native/compat/result.ts` (`pass`/`fail`/`error` verdict types with
+   empty/non-empty mismatch shapes enforced by type, factories,
+   canonical-schema validator). Narrow semantic layer only: status-iff-
+   `http-response` and the pass/fail-to-mismatch-count relationship — both
+   inexpressible in the schemas, both enforced at runtime; every other rule
+   stays schema-side. Factories and validators deep-freeze outputs; mutable
+   working copies come from explicit clone helpers (normalization boundary).
+   Shared ajv/diagnostic machinery factored into private
+   `native/compat/schemaCore.ts` with Task 006 behavior preserved
+   (its 23 tests pass unchanged). Readings confirmed during implementation
+   (no schema change): outcomes with nothing captured use the empty
+   representation (`headers: []`, zero-byte body); body metadata already
+   covers the bounded-capture strategy. Exit criteria met: JSON round-trip
+   and revalidation for response, failure, pass, fail, and error cases plus
+   invalid-state guards (`tests/unit/compat-observation-result.test.ts`,
+   29 tests). No comparison, no reporting.
 3. **Single-backend HTTP executor.** Capability-scoped client (no redirects by
    default, bounded buffers, spill-to-file, raw-chunk capture) against a
    caller-supplied base URL — no backend lifecycle yet. Exit: §14 scenarios run

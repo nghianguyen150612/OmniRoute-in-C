@@ -14,9 +14,10 @@
  *
  * Validation strategy: ajv (already a direct dependency, with in-repo
  * precedent in open-sse/vendor/codex-chatgpt-web/adapters/chatgpt-web/
- * output-validation.ts) compiles the canonical schema file. No hand-rolled
- * JSON Schema subset, no second schema copy: the TypeScript interfaces below
- * are compile-time conveniences only and are never consulted at runtime.
+ * output-validation.ts) compiles the canonical schema file via the shared
+ * `native/compat/schemaCore.ts` machinery. No hand-rolled JSON Schema subset,
+ * no second schema copy: the TypeScript interfaces below are compile-time
+ * conveniences only and are never consulted at runtime.
  *
  * Accepted document shapes:
  * - a single scenario object (validated directly against the schema), or
@@ -39,19 +40,24 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import Ajv, { type ErrorObject, type ValidateFunction } from "ajv";
+import {
+  compareCompatDiagnostics,
+  compileCanonicalSchema,
+  deepFreezeValue,
+  formatAjvError,
+  isRecord,
+  messageOf,
+  prefixPath,
+  type CompatDiagnostic,
+  type CompiledJsonSchema,
+} from "./schemaCore.ts";
+
+export type { DeepReadonly } from "./schemaCore.ts";
+import type { DeepReadonly } from "./schemaCore.ts";
 
 // ---------------------------------------------------------------------------
 // Public types (compile-time only; runtime truth is the canonical schema file)
 // ---------------------------------------------------------------------------
-
-export type DeepReadonly<T> = T extends (...args: never[]) => unknown
-  ? T
-  : T extends ReadonlyArray<unknown>
-    ? ReadonlyArray<DeepReadonly<T[number]>>
-    : T extends object
-      ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
-      : T;
 
 export interface CompatScenarioHttp {
   method: string;
@@ -127,19 +133,13 @@ export interface CompatScenario {
 /** A validated scenario. Instances are deep-frozen at load time. */
 export type LoadedScenario = DeepReadonly<CompatScenario>;
 
-export interface ScenarioDiagnostic {
-  /** Machine-readable failure category (see FILE_DIAGNOSTIC_CODES below). */
-  code: string;
+export interface ScenarioDiagnostic extends CompatDiagnostic {
   /** Absolute path of the scenario document being loaded. */
   file: string;
   /** Zero-based position within a scenario-set envelope, when applicable. */
   index?: number;
   /** Entry `id` when the entry carries a string id (even a malformed one). */
   scenarioId?: string;
-  /** Dotted field path, e.g. `http.method` or `scenarios[2].id`. */
-  path?: string;
-  /** Concise reason. Never contains fixture content or secret values. */
-  message: string;
 }
 
 export interface ScenarioLoadSuccess {
@@ -197,88 +197,29 @@ const DEFAULT_SCHEMA_PATH = fileURLToPath(
 );
 
 // ---------------------------------------------------------------------------
-// Schema compilation (cached per resolved schema path)
+// Schema compilation (cached per resolved schema path, via the shared core)
 // ---------------------------------------------------------------------------
 
-interface CompiledSchema {
-  resolvedPath: string;
-  validate: ValidateFunction;
-}
-
-const compiledByPath = new Map<string, CompiledSchema>();
-
-function compileSchema(schemaPath: string): CompiledSchema {
-  const resolvedPath = path.resolve(schemaPath);
-  const cached = compiledByPath.get(resolvedPath);
-  if (cached) return cached;
-  let raw: string;
-  try {
-    raw = readFileSync(resolvedPath, "utf8");
-  } catch (err) {
-    throw new Error(
-      `compat scenario loader: cannot read schema at ${resolvedPath}: ${messageOf(err)}`
-    );
-  }
-  let schema: unknown;
-  try {
-    schema = JSON.parse(raw) as unknown;
-  } catch (err) {
-    throw new Error(
-      `compat scenario loader: schema at ${resolvedPath} is not valid JSON: ${messageOf(err)}`
-    );
-  }
-  if (!isRecord(schema) && typeof schema !== "boolean") {
-    throw new Error(
-      `compat scenario loader: schema at ${resolvedPath} is not a JSON Schema object`
-    );
-  }
-  const ajv = new Ajv({ allErrors: true, strict: false, validateFormats: false });
-  const compiled: CompiledSchema = { resolvedPath, validate: ajv.compile(schema) };
-  compiledByPath.set(resolvedPath, compiled);
-  return compiled;
+function compileSchema(schemaPath: string): CompiledJsonSchema {
+  return compileCanonicalSchema({
+    label: "compat scenario loader",
+    defaultPath: schemaPath,
+  });
 }
 
 // ---------------------------------------------------------------------------
-// Small helpers
+// Small helpers (generic machinery lives in schemaCore.ts)
 // ---------------------------------------------------------------------------
 
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+function compareDiagnostics(a: ScenarioDiagnostic, b: ScenarioDiagnostic): number {
+  if ((a.index ?? 0) !== (b.index ?? 0)) return (a.index ?? 0) - (b.index ?? 0);
+  return compareCompatDiagnostics(a, b);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function deepFreezeValue(value: unknown): void {
-  if (value === null || typeof value !== "object" || Object.isFrozen(value)) return;
-  for (const child of Object.values(value)) deepFreezeValue(child);
-  Object.freeze(value);
-}
-
-/**
- * Convert an ajv JSON pointer (`/http/headers/accept`, `/tags/0`) to the
- * dotted form used in diagnostics (`http.headers.accept`, `tags[0]`).
- */
-function pointerToDotted(pointer: string): string {
-  if (!pointer) return "";
-  const parts = pointer
-    .split("/")
-    .slice(1)
-    .map((p) => p.replace(/~1/g, "/").replace(/~0/g, "~"));
-  let out = "";
-  for (const part of parts) {
-    if (/^(0|[1-9][0-9]*)$/.test(part) && out.length > 0) out += `[${part}]`;
-    else out += (out.length > 0 ? "." : "") + part;
-  }
-  return out;
-}
-
-function prefixPath(prefix: string, dotted: string): string {
-  if (!dotted) return prefix;
-  if (!prefix) return dotted;
-  return `${prefix}.${dotted}`;
-}
+// ---------------------------------------------------------------------------
+// ajv error mapping delegates to the shared core (schema-controlled context
+// only — never fixture values)
+// ---------------------------------------------------------------------------
 
 /**
  * Reduce a JSON.parse SyntaxError to position information only. V8 messages
@@ -295,61 +236,6 @@ function parseErrorMessage(err: unknown): string {
   return "file is not valid JSON";
 }
 
-function compareDiagnostics(a: ScenarioDiagnostic, b: ScenarioDiagnostic): number {
-  if ((a.index ?? 0) !== (b.index ?? 0)) return (a.index ?? 0) - (b.index ?? 0);
-  if ((a.path ?? "") !== (b.path ?? "")) return (a.path ?? "") < (b.path ?? "") ? -1 : 1;
-  if (a.code !== b.code) return a.code < b.code ? -1 : 1;
-  if (a.message !== b.message) return a.message < b.message ? -1 : 1;
-  return 0;
-}
-
-// ---------------------------------------------------------------------------
-// ajv error mapping (schema-controlled context only — never fixture values)
-// ---------------------------------------------------------------------------
-
-function messageForSchemaError(err: ErrorObject): string {
-  switch (err.keyword) {
-    case "required":
-      return `missing required field '${String((err.params as { missingProperty?: unknown }).missingProperty ?? "?")}'`;
-    case "additionalProperties":
-      return `unknown field '${String((err.params as { additionalProperty?: unknown }).additionalProperty ?? "?")}' is not allowed`;
-    case "enum": {
-      const allowed = (err.params as { allowedValues?: unknown }).allowedValues;
-      return Array.isArray(allowed)
-        ? `value must be one of: ${allowed.map((v) => JSON.stringify(v)).join(", ")}`
-        : "value is not one of the allowed values";
-    }
-    case "const":
-      return "value does not match the required constant for this field";
-    case "type":
-      return `value must be of type ${(err.params as { type?: unknown }).type ?? "?"}`;
-    case "pattern":
-      return "value does not match the required pattern for this field";
-    case "minLength":
-      return "value must not be empty";
-    case "minimum":
-    case "maximum":
-      return `value is outside the allowed range for this field`;
-    case "oneOf":
-    case "anyOf":
-      return "value does not match any allowed shape for this field";
-    default:
-      return err.message ?? "value is invalid for this field";
-  }
-}
-
-function pathForSchemaError(base: string, err: ErrorObject): string {
-  const dotted = pointerToDotted(err.instancePath);
-  const params = err.params as Record<string, unknown>;
-  if (err.keyword === "required" && typeof params["missingProperty"] === "string") {
-    return prefixPath(base, pointerToDotted(`${err.instancePath}/${params["missingProperty"]}`));
-  }
-  if (err.keyword === "additionalProperties" && typeof params["additionalProperty"] === "string") {
-    return prefixPath(base, pointerToDotted(`${err.instancePath}/${params["additionalProperty"]}`));
-  }
-  return prefixPath(base, dotted);
-}
-
 // ---------------------------------------------------------------------------
 // Per-scenario validation (schema first, then the narrow semantic layer)
 // ---------------------------------------------------------------------------
@@ -362,7 +248,7 @@ interface EntryContext {
 
 function validateScenarioEntry(
   entry: unknown,
-  compiled: CompiledSchema,
+  compiled: CompiledJsonSchema,
   ctx: EntryContext
 ): { scenario?: LoadedScenario; diagnostics: ScenarioDiagnostic[] } {
   const scenarioId = isRecord(entry) && typeof entry["id"] === "string" ? entry["id"] : undefined;
@@ -410,9 +296,8 @@ function validateScenarioEntry(
   }
   if (!valid) {
     for (const err of compiled.validate.errors ?? []) {
-      diagnostics.push(
-        diag("schema-error", messageForSchemaError(err), pathForSchemaError(ctx.pathPrefix, err))
-      );
+      const formatted = formatAjvError(ctx.pathPrefix, err);
+      diagnostics.push(diag("schema-error", formatted.message, formatted.path));
     }
     return { diagnostics };
   }
