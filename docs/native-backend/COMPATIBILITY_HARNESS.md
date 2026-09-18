@@ -777,10 +777,23 @@ Deliberately small stages; each is independently reviewable and leaves the
 tree green. Later prompts implement one stage at a time — no stage redesigns
 the data model.
 
-1. **Scenario loader + validation.** Parse/validate scenario files against
-   `compat-scenario.schema.json`; reject unknown top-level fields; resolve
-   `artifact` body refs. Exit: corpus of §14 examples loads clean; malformed
-   fixtures fail with field paths. No execution.
+1. **Scenario loader + validation — IMPLEMENTED (Task 006).** Entry point
+   `loadScenarioFile()` in `native/compat/scenarioLoader.ts`; ajv (already a
+   direct dependency) compiles the canonical
+   `contracts/compat-scenario.schema.json` at runtime, so no second schema
+   copy exists. Accepts one scenario object or a scenario-set envelope
+   (`{ ..., "scenarios": [...] }`, the shape of
+   `contracts/compat-models-examples.json`); unknown top-level fields
+   rejected; per-entry diagnostics with stable `(index, path, code)` ordering;
+   loaded scenarios deep-frozen. Narrow semantic layer only: set-level
+   duplicate-`id` detection, `persistence.tables` allowlist enforcement, and
+   the `redirect`-vs-`followRedirects` conflict. Two clarifications from
+   implementation (no schema change): envelope metadata outside `scenarios`
+   is tolerated and ignored; `http.body` artifact refs are carried through
+   shape-checked but unresolved — resolving them against a corpus root
+   belongs to the execution stage, which owns corpus roots. Exit criteria met:
+   the six §14 examples load clean; malformed fixtures fail with field paths
+   (`tests/unit/compat-scenario-loader.test.ts`, 23 tests). No execution.
 2. **Observation/result types.** Typed constructors + JSON serializers for the
    observation and result schemas; outcome-taxonomy enforcement (`status`
    present iff `http-response`); bounded-preview helpers. Exit: unit tests over
