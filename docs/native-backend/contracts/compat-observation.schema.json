@@ -1,0 +1,141 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "omniroute-native-contract/compat-observation/v1",
+  "title": "Compatibility harness observation (Task 005 design artifact, not runtime code)",
+  "description": "What the harness captures from one backend for one scenario, before normalization. Normative prose: docs/native-backend/COMPATIBILITY_HARNESS.md section 5. Status is present if and only if outcome is http-response; a missing response is never status 0.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "scenarioId", "backend", "outcome", "headers", "body"],
+  "properties": {
+    "schema": { "const": "compat-observation/v1" },
+    "scenarioId": { "type": "string", "minLength": 1 },
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "enum": ["reference", "native"] },
+        "revision": { "type": "string" },
+        "mode": { "type": "string" }
+      }
+    },
+    "outcome": {
+      "enum": [
+        "http-response",
+        "timeout",
+        "connection-refused",
+        "connection-reset",
+        "backend-exit",
+        "harness-error"
+      ]
+    },
+    "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+    "headers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "value"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "value": { "type": "string" }
+        }
+      }
+    },
+    "body": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes", "truncated"],
+      "properties": {
+        "bytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string" },
+        "truncated": { "type": "boolean" },
+        "capName": { "type": "string" },
+        "artifact": { "type": "string" },
+        "textPreview": { "type": "string" }
+      }
+    },
+    "json": {
+      "description": "Parsed body when content-type is JSON and fully captured under the parse cap; otherwise null."
+    },
+    "jsonParse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "skipped": { "type": "boolean" },
+        "reason": { "type": "string" }
+      }
+    },
+    "redirect": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "location": { "type": "string" },
+            "refresh": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "stream": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rawArtifact": { "type": "string" },
+            "rawBytes": { "type": "integer", "minimum": 0 },
+            "rawSha256": { "type": "string" },
+            "eventsArtifact": { "type": "string" },
+            "eventCount": { "type": "integer", "minimum": 0 },
+            "eventsTruncated": { "type": "boolean" },
+            "terminal": { "type": ["string", "null"] },
+            "closedCleanly": { "type": "boolean" },
+            "cancelled": { "type": "boolean" },
+            "timeoutMs": { "type": ["integer", "null"], "minimum": 0 }
+          }
+        }
+      ]
+    },
+    "failure": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": { "type": "string", "minLength": 1 },
+            "detail": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "observations": {
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": true }
+        },
+        "settledAfterMs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "wallMs": { "type": "number", "minimum": 0 },
+        "ttfbMs": { "type": ["number", "null"], "minimum": 0 }
+      }
+    },
+    "normalizedBy": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}

@@ -1,0 +1,192 @@
+{
+  "$schema": "omniroute-native-contract/compat-scenario/v1",
+  "contract": "Models scenarios in compatibility-harness scenario form (Task 005 specification examples only — no execution, no live catalog copied, no model-count parity)",
+  "reference": {
+    "catalog": "docs/native-backend/contracts/v1-models.contract.json",
+    "surface": "docs/native-backend/contracts/v1-models-compatibility-surface.contract.json",
+    "design": "docs/native-backend/COMPATIBILITY_HARNESS.md section 14"
+  },
+  "notes": [
+    "Every scenario below validates against contracts/compat-scenario.schema.json.",
+    "Redirect scenarios never follow redirects (followRedirects is false or omitted).",
+    "Environment-specific catalog size is not asserted; the shared fresh-install fixture fixes size within a run.",
+    "Volatile values (request ids, per-response timestamps) are normalized by named rules, never deleted globally."
+  ],
+  "scenarios": [
+    {
+      "schema": "compat-scenario/v1",
+      "id": "models-get-authenticated",
+      "description": "Authenticated GET /v1/models returns the 200 catalog envelope with pinned headers",
+      "http": {
+        "method": "GET",
+        "path": "/v1/models",
+        "headers": { "accept": "application/json" }
+      },
+      "auth": { "kind": "provisioned-api-key" },
+      "environment": { "requireApiKey": false },
+      "seed": { "fixture": "fresh-install" },
+      "compare": {
+        "status": 200,
+        "headers": {
+          "content-type": "exact",
+          "content-length": "exact",
+          "x-request-id": "presence",
+          "x-model-catalog-version": "exact",
+          "x-omniroute-route-class": "exact(CLIENT_API)"
+        },
+        "json": {
+          "mode": "shape",
+          "requiredPaths": ["object", "data"],
+          "orderedArray": "data",
+          "normalizePaths": { "data[].created": "catalog-created" }
+        },
+        "capabilities": ["http", "json", "auth"]
+      },
+      "timeout": "api",
+      "tags": ["models", "catalog", "read-only"]
+    },
+    {
+      "schema": "compat-scenario/v1",
+      "id": "models-head",
+      "description": "HEAD /v1/models returns bodyless 200 with transport close semantics",
+      "http": { "method": "HEAD", "path": "/v1/models" },
+      "auth": { "kind": "none" },
+      "environment": { "requireApiKey": false },
+      "seed": { "fixture": "fresh-install" },
+      "compare": {
+        "status": 200,
+        "headers": {
+          "content-type": "exact",
+          "content-length": "absent",
+          "connection": "exact(close)",
+          "x-model-catalog-version": "absent",
+          "x-omniroute-route-class": "exact(CLIENT_API)"
+        },
+        "capabilities": ["http"]
+      },
+      "timeout": "api",
+      "tags": ["models", "head", "read-only"]
+    },
+    {
+      "schema": "compat-scenario/v1",
+      "id": "models-options-preflight",
+      "description": "OPTIONS /v1/models short-circuits to the pipeline 204 preflight without auth",
+      "http": {
+        "method": "OPTIONS",
+        "path": "/v1/models",
+        "headers": {
+          "origin": "https://example.test",
+          "access-control-request-method": "GET",
+          "access-control-request-headers": "authorization, content-type"
+        }
+      },
+      "auth": { "kind": "none" },
+      "environment": { "requireApiKey": true },
+      "seed": { "fixture": "fresh-install" },
+      "compare": {
+        "status": 204,
+        "headers": {
+          "content-type": "absent",
+          "content-length": "absent",
+          "allow": "absent",
+          "access-control-allow-methods": "exact(GET, POST, PUT, DELETE, PATCH, OPTIONS)",
+          "access-control-allow-headers": "exact(authorization, content-type)",
+          "access-control-allow-origin": "exact(https://example.test)",
+          "vary": "exact(Origin)"
+        },
+        "capabilities": ["http"]
+      },
+      "timeout": "api",
+      "tags": ["models", "options", "cors", "read-only"]
+    },
+    {
+      "schema": "compat-scenario/v1",
+      "id": "models-alias",
+      "description": "GET /models behaves identically to GET /v1/models via the internal rewrite",
+      "http": {
+        "method": "GET",
+        "path": "/models",
+        "headers": { "accept": "application/json" }
+      },
+      "auth": { "kind": "provisioned-api-key" },
+      "environment": { "requireApiKey": false },
+      "seed": { "fixture": "fresh-install" },
+      "compare": {
+        "status": 200,
+        "headers": {
+          "content-type": "exact",
+          "x-request-id": "presence",
+          "x-model-catalog-version": "exact",
+          "x-omniroute-route-class": "exact(CLIENT_API)"
+        },
+        "json": {
+          "mode": "shape",
+          "requiredPaths": ["object", "data"],
+          "orderedArray": "data",
+          "normalizePaths": { "data[].created": "catalog-created" }
+        },
+        "capabilities": ["http", "json", "auth"]
+      },
+      "timeout": "api",
+      "tags": ["models", "alias", "read-only"]
+    },
+    {
+      "schema": "compat-scenario/v1",
+      "id": "models-trailing-slash-redirect",
+      "description": "GET /v1/models/ raw-redirects with 308 preserving path and query before auth",
+      "http": {
+        "method": "GET",
+        "path": "/v1/models/",
+        "query": { "limit": "1", "x": "probe" },
+        "followRedirects": false
+      },
+      "auth": { "kind": "none" },
+      "environment": { "requireApiKey": true },
+      "seed": { "fixture": "fresh-install" },
+      "compare": {
+        "status": 308,
+        "headers": {
+          "content-type": "absent",
+          "x-omniroute-route-class": "absent"
+        },
+        "redirect": {
+          "location": "/v1/models?limit=1&x=probe",
+          "refresh": "0;url=/v1/models?limit=1&x=probe"
+        },
+        "capabilities": ["http", "redirect"]
+      },
+      "timeout": "api",
+      "tags": ["models", "redirect", "trailing-slash", "read-only"]
+    },
+    {
+      "schema": "compat-scenario/v1",
+      "id": "models-neighbor-json-404",
+      "description": "GET /v1/<unknown> returns the JSON unknown_route 404 boundary error",
+      "http": { "method": "GET", "path": "/v1/task004-does-not-exist" },
+      "auth": { "kind": "provisioned-api-key" },
+      "environment": { "requireApiKey": false },
+      "seed": { "fixture": "fresh-install" },
+      "compare": {
+        "status": 404,
+        "headers": {
+          "content-type": "exact",
+          "x-model-catalog-version": "absent",
+          "x-omniroute-route-class": "exact(CLIENT_API)"
+        },
+        "json": {
+          "mode": "error-triple",
+          "expected": {
+            "error": {
+              "type": "not_found",
+              "code": "unknown_route",
+              "message": "contains(Unknown API route)"
+            }
+          }
+        },
+        "capabilities": ["http", "json", "auth"]
+      },
+      "timeout": "api",
+      "tags": ["models", "404-boundary", "read-only"]
+    }
+  ]
+}

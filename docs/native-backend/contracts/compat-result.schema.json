@@ -1,0 +1,71 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "omniroute-native-contract/compat-result/v1",
+  "title": "Compatibility harness result (Task 005 design artifact, not runtime code)",
+  "description": "Comparison verdict for one scenario across the reference and native observations. Normative prose: docs/native-backend/COMPATIBILITY_HARNESS.md section 13. Terminal output carries the verdict plus bounded mismatch values only; full bodies live in artifacts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "scenarioId", "verdict", "reference", "native", "mismatches", "artifacts"],
+  "properties": {
+    "schema": { "const": "compat-result/v1" },
+    "scenarioId": { "type": "string", "minLength": 1 },
+    "verdict": { "enum": ["pass", "fail", "error"] },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observation", "outcome"],
+      "properties": {
+        "observation": { "type": "string", "minLength": 1 },
+        "outcome": { "type": "string", "minLength": 1 }
+      }
+    },
+    "native": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observation", "outcome"],
+      "properties": {
+        "observation": { "type": "string", "minLength": 1 },
+        "outcome": { "type": "string", "minLength": 1 }
+      }
+    },
+    "mismatches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["dimension", "path", "rule", "reference", "native", "normalized"],
+        "properties": {
+          "dimension": {
+            "enum": [
+              "status",
+              "headers",
+              "json",
+              "error",
+              "redirect",
+              "stream",
+              "cancel",
+              "persistence",
+              "timing",
+              "outcome"
+            ]
+          },
+          "path": { "type": "string", "minLength": 1 },
+          "rule": { "type": "string", "minLength": 1 },
+          "reference": { "type": "string" },
+          "native": { "type": "string" },
+          "normalized": { "type": "boolean" },
+          "artifact": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dir", "result"],
+      "properties": {
+        "dir": { "type": "string", "minLength": 1 },
+        "result": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

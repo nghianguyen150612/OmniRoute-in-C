@@ -1,0 +1,191 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "omniroute-native-contract/compat-scenario/v1",
+  "title": "Compatibility harness scenario (Task 005 design artifact, not runtime code)",
+  "description": "Declarative scenario definition. Normative prose: docs/native-backend/COMPATIBILITY_HARNESS.md section 4.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "id", "description", "http", "compare"],
+  "properties": {
+    "schema": { "const": "compat-scenario/v1" },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "description": { "type": "string", "minLength": 1 },
+    "http": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "path"],
+      "properties": {
+        "method": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "pattern": "^/" },
+        "query": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "body": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["artifact"],
+              "properties": {
+                "artifact": { "type": "string", "minLength": 1 }
+              }
+            }
+          ]
+        },
+        "followRedirects": { "type": "boolean", "default": false }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "enum": ["none", "provisioned-api-key", "invalid-key", "malformed-scheme", "session"]
+        },
+        "value": { "type": "string" },
+        "note": { "type": "string" }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "description": "Abstract backend-config requirements; adapters map these to real env/flags.",
+      "additionalProperties": true
+    },
+    "seed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fixture"],
+      "properties": {
+        "fixture": { "type": "string", "minLength": 1 },
+        "tables": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "compare": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "headers": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        },
+        "json": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "enum": [
+                "exact",
+                "shape",
+                "subset",
+                "ordered-array",
+                "unordered-array",
+                "error-triple"
+              ]
+            },
+            "requiredPaths": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "absentPaths": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "orderedArray": { "type": "string" },
+            "normalizePaths": {
+              "type": "object",
+              "additionalProperties": { "type": "string", "minLength": 1 }
+            },
+            "ignorePaths": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "expected": {}
+          }
+        },
+        "redirect": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "location": { "type": "string" },
+            "refresh": { "type": "string" }
+          }
+        },
+        "stream": { "type": "object", "additionalProperties": true },
+        "cancel": { "type": "object", "additionalProperties": true },
+        "capabilities": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tables": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "observations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["table", "select"],
+            "properties": {
+              "table": { "type": "string", "minLength": 1 },
+              "where": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "select": {
+                "oneOf": [
+                  { "const": "count" },
+                  { "const": "exists" },
+                  {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  }
+                ]
+              },
+              "orderBy": { "type": "string" },
+              "limit": { "type": "integer", "minimum": 1 },
+              "expect": {}
+            }
+          }
+        },
+        "settleMs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "timeout": {
+      "enum": ["health", "api", "chat", "stream", "bulk"]
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "capabilities": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "extensions": {
+      "type": "object",
+      "description": "Namespaced forward-compatible extras; comparators ignore unknown namespaces."
+    }
+  }
+}
