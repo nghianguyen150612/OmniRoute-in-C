@@ -1,0 +1,290 @@
+{
+  "$schema": "omniroute-native-contract/v1",
+  "contract": "Models HTTP compatibility surface (Task 004)",
+  "reference": {
+    "repo": "OmniRoute-in-C",
+    "commit": "aaf95e01a",
+    "version": "3.8.51",
+    "verified": "2026-09-18",
+    "method": "SOURCE VERIFIED plus RUNTIME VERIFIED with isolated Next.js development boots using fresh temporary SQLite state"
+  },
+  "scope": [
+    "the exact public paths /v1/models and /models",
+    "HEAD, OPTIONS, unsupported methods, trailing slash, case, query preservation, and the neighboring JSON-404 boundary",
+    "ordering of normalization, proxy classification, authentication, and method handling"
+  ],
+  "paths": {
+    "canonicalPublic": "/v1/models",
+    "aliasPublic": "/models",
+    "effectiveRoute": "/api/v1/models",
+    "singleModelChild": "/v1/models/<model-id>"
+  },
+  "pipelineCors": {
+    "standardAllowMethods": "GET, POST, PUT, DELETE, PATCH, OPTIONS",
+    "standardAllowHeaders": "Content-Type, Authorization, x-api-key, anthropic-version, x-omniroute-connection, X-OmniRoute-Lease-Owner, X-OmniRoute-Lease-Generation, x-internal-test, accept"
+  },
+  "alias": {
+    "mechanism": "internal rewrite, not redirect",
+    "definition": "next.config.mjs:719-721, source /models -> destination /api/v1/models",
+    "clientVisibleUrlChanged": false,
+    "queryPreserved": true,
+    "methodPreserved": true,
+    "ordinaryRequestHeadersPreserved": true,
+    "pipelineHeaderCaveat": "The authz pipeline removes or replaces trusted internal headers for both paths; this is common pipeline processing, not an alias difference.",
+    "proxyAndAuthClassification": "The proxy sees the public pathname before route dispatch. /models is matched by src/proxy.ts and normalized by src/server/authz/classify.ts to CLIENT_API with effective path /api/v1/models, just as /v1/models is.",
+    "handlerIdentity": "Both exact paths dispatch to src/app/api/v1/models/route.ts after the internal rewrite.",
+    "observableDifferences": "No path-specific difference was observed in status, body, route-class, CORS, or catalog headers when the exact rewrite fires. Request IDs and timing naturally differ per request.",
+    "evidence": "SOURCE VERIFIED; RUNTIME VERIFIED for GET, HEAD, OPTIONS, representative unsupported methods, and auth-required requests"
+  },
+  "head": {
+    "paths": ["/v1/models", "/models"],
+    "openRuntime": {
+      "status": 200,
+      "clientBodyBytes": 0,
+      "contentType": "application/json",
+      "contentLength": "absent",
+      "connection": "close",
+      "allow": "absent",
+      "cacheControl": "absent",
+      "catalogVersion": "absent",
+      "routeClass": "CLIENT_API",
+      "cors": "The pipeline supplies the global Allow-Methods and Allow-Headers values. A credentialless request with an unlisted Origin has no Access-Control-Allow-Origin; token-bearing requests use the relaxed token-auth origin rule."
+    },
+    "authRequiredWithoutCredential": {
+      "status": 401,
+      "clientBodyBytes": 0,
+      "contentType": "application/json",
+      "handlerBodySuppressed": true,
+      "authBeforeRouteHandler": true
+    },
+    "execution": {
+      "routeExport": "src/app/api/v1/models/route.ts:25-30 explicitly exports HEAD",
+      "getHandlerExecutes": false,
+      "catalogConstruction": false,
+      "catalogCacheAccess": false,
+      "afterRefresh": false,
+      "apiKeyLastUsed": "A valid database-backed API key can update last_used_at when clientApiPolicy validates it and the update is not suppressed by the validation/update TTL. Anonymous requests and configured environment keys do not create that database-row update. This possible auth-policy side effect is separate from the explicit HEAD handler.",
+      "transport": "scripts/dev/head-response-guard.cjs suppresses any response bytes and adds Connection: close for every inbound HEAD before Next handles it."
+    },
+    "aliasVsCanonical": "Identical for the exact paths",
+    "evidence": "SOURCE VERIFIED; TEST VERIFIED by tests/unit/head-request-v1-models-6400.test.ts; RUNTIME VERIFIED in open and REQUIRE_API_KEY=true isolated boots"
+  },
+  "options": {
+    "paths": ["/v1/models", "/models"],
+    "runtime": {
+      "status": 204,
+      "clientBodyBytes": 0,
+      "contentType": "absent",
+      "contentLength": "absent",
+      "allow": "absent",
+      "authEvaluated": false,
+      "routeHandlerReached": false,
+      "pipelineShortCircuit": "src/server/authz/pipeline.ts:359-365 returns the preflight response before policy evaluation or route dispatch",
+      "cors": {
+        "accessControlAllowMethods": "GET, POST, PUT, DELETE, PATCH, OPTIONS",
+        "accessControlAllowHeaders": "The raw Access-Control-Request-Headers value when supplied; otherwise pipelineCors.standardAllowHeaders",
+        "accessControlAllowOrigin": "The supplied Origin is echoed for a preflight on the relaxed CLIENT_API surface",
+        "vary": "Origin; no Accept-Encoding value is added to the 204 response"
+      }
+    },
+    "routeExportContrast": "The explicit route export in src/app/api/v1/models/route.ts:8-15 is not reached through these public paths because the proxy short-circuits OPTIONS. Its direct Response has the route-local GET, HEAD, OPTIONS methods and wildcard headers, but the observed HTTP contract is the pipeline 204 above.",
+    "aliasVsCanonical": "Identical",
+    "evidence": "SOURCE VERIFIED; RUNTIME VERIFIED with representative Origin, Access-Control-Request-Method, and Access-Control-Request-Headers; TEST VERIFIED by the OPTIONS assertions in tests/unit/authz/pipeline.test.ts and the direct route test"
+  },
+  "unsupportedMethods": {
+    "normalRouteMethods": {
+      "methods": ["POST", "PUT", "PATCH", "DELETE"],
+      "openRuntime": {
+        "status": 405,
+        "clientBodyBytes": 0,
+        "contentType": "absent",
+        "contentLength": "absent",
+        "allow": "absent",
+        "handling": "Next.js App Router default for a route exporting only GET, HEAD, and OPTIONS; the response is empty in the isolated development runtime",
+        "cors": "The request has CLIENT_API pipeline route/request headers and the standard CORS method/header headers"
+      },
+      "authRequiredWithoutCredential": {
+        "status": 401,
+        "authBefore405": true,
+        "handling": "clientApiPolicy rejects before Next.js performs route method handling"
+      },
+      "aliasVsCanonical": "Identical for the exact paths",
+      "evidence": "SOURCE VERIFIED; RUNTIME VERIFIED for representative POST, PUT, PATCH, and DELETE requests in open mode and POST in REQUIRE_API_KEY=true mode"
+    },
+    "transportGuard": {
+      "representativeMethod": "TRACE",
+      "alsoCoveredBySameGuard": ["TRACK", "CONNECT"],
+      "status": 405,
+      "contentType": "application/json; charset=utf-8",
+      "bodyShape": {
+        "error": {
+          "code": "METHOD_NOT_ALLOWED",
+          "message": "<METHOD> is not allowed"
+        }
+      },
+      "allow": "GET, POST, OPTIONS",
+      "cacheControl": "no-store",
+      "proxyReached": false,
+      "authEvaluated": false,
+      "aliasVsCanonical": "Identical",
+      "source": "scripts/dev/http-method-guard.cjs and scripts/dev/run-next.mjs invoke this guard before Next/proxy processing",
+      "evidence": "SOURCE VERIFIED; RUNTIME VERIFIED for TRACE against both exact paths"
+    }
+  },
+  "trailingSlash": {
+    "configuration": "next.config.mjs does not set trailingSlash; the observed Next.js default is trailingSlash=false",
+    "rawRequestsAreNotFollowed": true,
+    "canonical": {
+      "request": "/v1/models/?limit=1&x=task004",
+      "status": 308,
+      "location": "/v1/models?limit=1&x=task004",
+      "refresh": "0;url=/v1/models?limit=1&x=task004"
+    },
+    "alias": {
+      "request": "/models/?limit=1&x=task004",
+      "status": 308,
+      "location": "/models?limit=1&x=task004",
+      "refresh": "0;url=/models?limit=1&x=task004"
+    },
+    "commonResponse": {
+      "queryPreservedInRedirect": true,
+      "proxyRouteClassHeader": "absent",
+      "auth": "not evaluated before the redirect",
+      "cors": "No pipeline CORS headers on the raw redirect",
+      "contentType": "absent",
+      "head": "HEAD receives the same 308 and Location/Refresh headers but zero client body bytes and Connection: close from the transport guard",
+      "options": "OPTIONS receives the same 308 and small plain-text redirect body, without the pipeline preflight headers"
+    },
+    "ordering": "Next trailing-slash normalization occurs before the observed proxy/auth stage and before the alias/canonical rewrite. A separately followed request to the slashless Location is a new request and is not part of the raw redirect result.",
+    "evidence": "SOURCE VERIFIED for configuration; RUNTIME VERIFIED for GET, HEAD, and OPTIONS with REQUIRE_API_KEY=true, including query-bearing Locations"
+  },
+  "caseSensitivity": {
+    "scope": "The Models paths only; runtime observations are Linux",
+    "runtimeMatrix": [
+      { "path": "/v1/models", "status": 200, "routeClass": "CLIENT_API" },
+      { "path": "/V1/models", "status": 200, "routeClass": "CLIENT_API" },
+      { "path": "/models", "status": 200, "routeClass": "CLIENT_API" },
+      { "path": "/Models", "status": 200, "routeClass": "CLIENT_API" },
+      {
+        "path": "/v1/Models",
+        "status": 404,
+        "contentType": "application/json",
+        "routeClass": "CLIENT_API",
+        "errorCode": "unknown_route"
+      },
+      {
+        "path": "/V1/MODELS",
+        "status": 404,
+        "contentType": "application/json",
+        "routeClass": "CLIENT_API",
+        "errorCode": "unknown_route"
+      }
+    ],
+    "sourceExplanation": "The proxy matcher explicitly accepts case variants of v1 and models, and Next rewrite matching is case-insensitive. src/server/authz/classify.ts recognizes the control segment case-insensitively but preserves the original-case tail. On the Linux reference runtime, /v1/Models therefore dispatches to a case-sensitive unmatched route rather than to /api/v1/models.",
+    "sourceAcceptedButNotSeparatelyRuntimeProbed": ["/MODELS", "/mOdElS"],
+    "crossPlatform": "The result of filesystem route resolution for a mixed-case tail on a case-insensitive filesystem is UNRESOLVED and must not be generalized from the Linux runtime."
+  },
+  "queryPreservation": {
+    "sampleQuery": "limit=1&after=__task004_missing__&prefix=canonical",
+    "canonical": "/v1/models?limit=1&after=__task004_missing__&prefix=canonical",
+    "alias": "/models?limit=1&after=__task004_missing__&prefix=canonical",
+    "effectiveQuery": "Equivalent at the Models handler",
+    "runtimeObservation": "Both requests returned 200 with the same observable page result, body length, and X-Model-Catalog-Version value; the query was chosen so limit=1 remained observable.",
+    "mechanism": "The /models rewrite changes the pathname only and forwards the query string; the /v1 rewrite likewise forwards the query string to /api/v1/models.",
+    "evidence": "SOURCE VERIFIED; RUNTIME VERIFIED; pagination semantics remain covered by Task 003 and are not re-specified here"
+  },
+  "json404Boundary": {
+    "purpose": "Provide only the neighboring distinctions needed by a native Models router",
+    "probes": [
+      {
+        "path": "/v1/task004-does-not-exist",
+        "status": 404,
+        "contentType": "application/json",
+        "bodyShape": {
+          "error": {
+            "type": "not_found",
+            "code": "unknown_route",
+            "message": "Unknown API route: /v1/task004-does-not-exist",
+            "path": "/v1/task004-does-not-exist"
+          }
+        },
+        "routeClass": "CLIENT_API",
+        "authCanPreempt": true,
+        "source": "src/app/api/v1/[...omnirouteCatchAll]/route.ts"
+      },
+      {
+        "path": "/v1/models/task004-does-not-exist",
+        "status": 404,
+        "contentType": "application/json",
+        "bodyShape": {
+          "error": {
+            "type": "invalid_request_error",
+            "code": "model_not_found",
+            "message": "The model 'task004-does-not-exist' does not exist"
+          }
+        },
+        "routeClass": "CLIENT_API",
+        "authCanPreempt": true,
+        "source": "src/app/api/v1/models/[...model]/route.ts -> modelById.ts; this is a dynamic model lookup, not the v1 catch-all"
+      },
+      {
+        "path": "/models-neighbor-does-not-exist",
+        "status": 404,
+        "contentType": "text/html; charset=utf-8",
+        "bodyShape": "HTML not-found page; no JSON error envelope",
+        "routeClassHeader": "absent",
+        "authCanPreempt": false,
+        "relevantHeaders": "Next page-rendering headers, including Cache-Control: no-cache, must-revalidate; no authz CORS overlay",
+        "source": "The alias rewrite and proxy matcher are exact /models entries; unmatched root paths fall through to the app not-found page"
+      }
+    ],
+    "jsonErrorHeaders": "The two /v1 JSON responses carry CLIENT_API route/request headers and the standard pipeline CORS method/header headers; neither carries X-Model-Catalog-Version.",
+    "authOrdering": "With REQUIRE_API_KEY=true and no credential, both /v1 probes return the pipeline 401 before their respective 404 handlers. The root-level probe remains an HTML 404 because it is not covered by the Models proxy matcher.",
+    "evidence": "SOURCE VERIFIED; TEST VERIFIED by tests/unit/api/v1-catchall-json-404.test.ts and related catch-all tests; RUNTIME VERIFIED for all three representative paths"
+  },
+  "authOrdering": {
+    "matchedModelsPath": [
+      "Next normalizes a trailing slash first when present",
+      "proxy/classifier sees the public /v1/models or /models pathname and assigns CLIENT_API",
+      "for non-GET/non-OPTIONS methods the API body-size gate runs before policy; empty probes pass it",
+      "OPTIONS short-circuits to 204 before policy",
+      "other methods enter clientApiPolicy; a required credential failure returns 401 before route/method handling",
+      "an allowed request reaches the internal rewrite and the same Models route handler"
+    ],
+    "invalidMethod": "A normal unsupported method therefore encounters auth before the framework 405 when authentication is required. TRACE is different: the Node transport guard returns 405 before proxy/auth.",
+    "trailingSlash": "The raw 308 occurs before proxy/auth, including with REQUIRE_API_KEY=true.",
+    "aliasClassification": "No canonical-vs-alias auth-order difference was observed or found in source.",
+    "evidence": "SOURCE VERIFIED; RUNTIME VERIFIED with open and REQUIRE_API_KEY=true isolated boots"
+  },
+  "evidence": {
+    "source": [
+      "next.config.mjs:704-778 (rewrites; no trailingSlash setting)",
+      "src/proxy.ts:23-52 (proxy matcher and Models case matching)",
+      "src/server/authz/classify.ts:7-56 (alias normalization and case-preserving tail)",
+      "src/server/authz/pipeline.ts:263-446 (body-size gate, OPTIONS short circuit, policy ordering, CORS)",
+      "src/server/authz/policies/clientApi.ts:57-100 (client API authentication policy)",
+      "src/app/api/v1/models/route.ts:1-43 (GET, explicit HEAD, explicit OPTIONS)",
+      "src/app/api/v1/models/[...model]/route.ts and src/app/api/v1/models/modelById.ts (single-model 404)",
+      "src/app/api/v1/[...omnirouteCatchAll]/route.ts (v1 JSON 404)",
+      "src/app/not-found.tsx (root page not-found boundary)",
+      "src/server/cors/origins.ts:167-205 (pipeline CORS behavior)",
+      "src/lib/db/apiKeys.ts:308-318,1225-1319 (last-used update during database-key validation)",
+      "scripts/dev/run-next.mjs, scripts/dev/head-response-guard.cjs, and scripts/dev/http-method-guard.cjs (transport guards)"
+    ],
+    "tests": [
+      "TEST VERIFIED: tests/unit/head-request-v1-models-6400.test.ts",
+      "TEST VERIFIED: tests/unit/authz/pipeline.test.ts",
+      "TEST VERIFIED: tests/unit/authz/proxy-matcher-case.test.ts",
+      "TEST VERIFIED: tests/unit/api/v1-catchall-json-404.test.ts",
+      "TEST VERIFIED: tests/unit/api/root-catchall-json-404.test.ts",
+      "TEST VERIFIED: tests/unit/head-request-closes-6400.test.ts",
+      "TEST VERIFIED: tests/unit/dast-method-not-allowed.test.ts"
+    ],
+    "runtime": "RUNTIME VERIFIED against an isolated Next.js development server on Linux, with fresh temporary SQLite state, both REQUIRE_API_KEY=false and REQUIRE_API_KEY=true, raw redirects not followed, and no operator process reused or modified."
+  },
+  "unresolved": [
+    "The exact default 405 and page-not-found framing in a separately built production standalone runtime was not live-probed; the contract records the verified development-server behavior and source path.",
+    "Mixed-case tail route resolution on case-insensitive filesystems was not runtime-probed and remains platform-dependent.",
+    "A valid database-backed API-key last_used_at write was source-verified as possible but was not isolated in a live side-effect probe; its TTL/cache conditions are not universal requirements."
+  ]
+}

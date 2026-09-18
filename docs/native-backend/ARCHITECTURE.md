@@ -425,6 +425,111 @@ output_item/delta/completed`, keepalive every 3s, `highWaterMark 16k`).
   (`src/app/api/v1/_shared/specialtyCatalog.ts`).
 - Provider-pinned: `GET /v1/providers/[provider]/models|limits`.
 
+### 8.1 Models HTTP compatibility surface **[confirmed — Task 004]**
+
+Full contract:
+`docs/native-backend/contracts/v1-models-compatibility-surface.contract.json`.
+
+- **Alias `/models` — SOURCE VERIFIED; RUNTIME VERIFIED**: the exact
+  rule at `next.config.mjs:719-721` is an internal rewrite from
+  `/models` to `/api/v1/models`, not a redirect. The client-visible URL
+  does not change. Next preserves the query string, method, and ordinary
+  request headers; the authz pipeline still strips/replaces its trusted
+  internal headers for both public paths. Proxy classification sees the
+  public pathname before route dispatch: `src/proxy.ts:51` matches the
+  alias and `src/server/authz/classify.ts:7-56` normalizes it to
+  `CLIENT_API`/`/api/v1/models`. Exact `/models` and `/v1/models` then
+  execute the same `src/app/api/v1/models/route.ts` handler. No
+  path-specific status, body, route-class, CORS, or catalog-header
+  difference was observed; request IDs and timing naturally vary.
+- **HEAD — SOURCE VERIFIED; TEST VERIFIED; RUNTIME VERIFIED**:
+  `HEAD /v1/models` and `HEAD /models` both return `200` in the open
+  runtime, `Content-Type: application/json`, zero client body bytes,
+  no `Content-Length`, and `Connection: close`. The explicit handler at
+  `src/app/api/v1/models/route.ts:25-30` does not call GET, construct or
+  read the catalog cache, or schedule `after()` work. The global
+  `scripts/dev/head-response-guard.cjs` independently suppresses bytes
+  and forces the connection close for every HEAD request. The authz
+  pipeline still runs: with `REQUIRE_API_KEY=true`, no credential returns
+  `401` before the route handler, with the body suppressed at transport.
+  A valid database-backed API key can update `api_keys.last_used_at`
+  during policy validation (subject to the validation/update TTL); that
+  possible auth-policy side effect is not caused by the HEAD handler.
+  The alias and canonical path are identical.
+- **OPTIONS — SOURCE VERIFIED; TEST VERIFIED; RUNTIME VERIFIED**:
+  `OPTIONS /v1/models` and `OPTIONS /models` return `204` with an empty
+  body, no `Content-Type`, no `Content-Length`, and no `Allow` header.
+  `src/server/authz/pipeline.ts:359-365` short-circuits before policy
+  evaluation and route dispatch, so authentication is bypassed. With
+  representative preflight headers, the pipeline echoes the Origin and
+  requested header list and returns the global method list
+  `GET, POST, PUT, DELETE, PATCH, OPTIONS`; it adds `Vary: Origin` but
+  not `Vary: Accept-Encoding` for the 204. The route-local OPTIONS
+  export at `route.ts:8-15` is therefore not the observed public
+  contract (its direct `Response` defaults to status 200 and advertises
+  different route-local headers).
+- **Unsupported methods — SOURCE VERIFIED; RUNTIME VERIFIED**: for
+  normal `POST`, `PUT`, `PATCH`, and `DELETE`, an open request reaches
+  Next's default unexported-method handling and returns `405` with an
+  empty body, no `Content-Type`, no `Content-Length`, and no `Allow`
+  header in the development runtime. When API-key authentication is
+  required, the same request without a credential returns `401` before
+  the framework 405. `TRACE` is a separate transport case:
+  `scripts/dev/http-method-guard.cjs` rejects it (and `TRACK`/`CONNECT`)
+  before proxy/auth with `405`, `Content-Type: application/json; charset=utf-8`,
+  `Allow: GET, POST, OPTIONS`, `Cache-Control: no-store`,
+  and `{error:{code:"METHOD_NOT_ALLOWED",message:"TRACE is not allowed"}}`.
+  Canonical and alias behavior is identical for these exact paths.
+- **Trailing slash — SOURCE VERIFIED; RUNTIME VERIFIED**:
+  `next.config.mjs` has no `trailingSlash` setting, and the observed
+  default normalizes `/v1/models/` to `/v1/models` and `/models/` to
+  `/models` with raw `308` redirects. For example,
+  `/v1/models/?limit=1&x=task004` returns
+  `Location: /v1/models?limit=1&x=task004` and
+  `Refresh: 0;url=/v1/models?limit=1&x=task004`; the alias keeps its
+  alias path in the corresponding Location. The raw redirect has no
+  proxy route-class or pipeline CORS headers and occurs before auth,
+  including when `REQUIRE_API_KEY=true`. HEAD has zero client body
+  bytes because of the transport guard; OPTIONS does not become a
+  pipeline preflight. Redirects were not followed while recording this
+  contract.
+- **Case sensitivity — SOURCE VERIFIED; RUNTIME VERIFIED on Linux**:
+  `/v1/models`, `/V1/models`, `/models`, and `/Models` returned `200`
+  and `CLIENT_API`. `/v1/Models` and `/V1/MODELS` reached the
+  `CLIENT_API` path but returned the JSON `unknown_route` 404. The
+  proxy matcher and rewrite control segments accept case variants, while
+  `classify.ts` preserves the original-case tail; the Linux filesystem
+  route lookup is consequently case-sensitive for that tail. The result
+  on a case-insensitive filesystem was not runtime-probed and remains
+  platform-dependent.
+- **Query preservation — SOURCE VERIFIED; RUNTIME VERIFIED**: the
+  representative query `limit=1&after=__task004_missing__&prefix=canonical`
+  produced equivalent effective query state for
+  `/models?...` and `/v1/models?...`: both returned the same observable
+  page result, body length, and `X-Model-Catalog-Version` value. This
+  records alias forwarding only; Task 003 remains the contract for
+  pagination semantics.
+- **Neighboring 404 boundary — SOURCE VERIFIED; TEST VERIFIED;
+  RUNTIME VERIFIED**: `/v1/task004-does-not-exist` returns JSON `404`
+  with `error.type=not_found`, `error.code=unknown_route`, and the
+  public path; `/v1/models/task004-does-not-exist` returns JSON `404`
+  with `error.type=invalid_request_error` and
+  `error.code=model_not_found` from the dynamic model lookup. Both are
+  `CLIENT_API` responses and can be preempted by required authentication.
+  The nearby unmatched root path `/models-neighbor-does-not-exist`
+  returns the app's HTML `404` page (`text/html; charset=utf-8`) with no
+  authz route-class overlay, because the exact `/models` alias matcher
+  does not cover it. With required API-key auth it remains the HTML 404.
+  This is the narrow boundary contract, not a general audit of API 404s.
+- **Authentication ordering — SOURCE VERIFIED; RUNTIME VERIFIED**:
+  for matched Models paths, trailing-slash normalization precedes the
+  observed proxy/auth stage; non-GET/non-OPTIONS requests pass the body
+  size gate before policy; OPTIONS bypasses policy; other requests enter
+  `clientApiPolicy` before route/method handling. Thus required auth
+  returns `401` before a normal 405 or JSON 404. `TRACE` is the explicit
+  exception because the Node transport guard runs before proxy/auth.
+  Canonical and alias ordering is the same.
+
 ## 9. Provider abstraction **[confirmed]**
 
 ### 9.1 Declaration — `src/shared/constants/providers.ts` (507 lines)
