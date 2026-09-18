@@ -815,10 +815,48 @@ the data model.
    and revalidation for response, failure, pass, fail, and error cases plus
    invalid-state guards (`tests/unit/compat-observation-result.test.ts`,
    29 tests). No comparison, no reporting.
-3. **Single-backend HTTP executor.** Capability-scoped client (no redirects by
-   default, bounded buffers, spill-to-file, raw-chunk capture) against a
-   caller-supplied base URL — no backend lifecycle yet. Exit: §14 scenarios run
-   against the live reference by hand and produce observations.
+3. **Single-backend HTTP executor — IMPLEMENTED (Task 008).** Entry point
+   `executeCompatScenario()` in `native/compat/httpExecutor.ts`: loaded
+   scenario + caller-provided backend identity/base URL + already-resolved
+   request inputs (`resolvedHeaders` merged over scenario headers for later
+   auth stages; scenario string bodies sent as UTF-8 bytes) → bounded
+   non-streaming fetch → raw frozen observation via the Task 007 factories
+   (the result model is never imported). Redirects obey the scenario policy
+   (`manual` by default, so raw `308 + Location` is observed verbatim;
+   `follow` only when the scenario declares it). Every request carries a
+   finite `AbortSignal.timeout` (no unbounded fetch): the scenario category
+   maps through `resolveCompatTimeoutMs()` to the §12 evidence anchors
+   (`health` 5 s, `api` 10 s, `chat` 20 s, `stream` 30 s) with two explicit
+   Stage 3 choices — `bulk` 60 s (no evidence anchor exists) and the `api`
+   category when the scenario declares none. Transport failures classify by
+   structured error identity (`classifyCompatTransportError()`:
+   `TimeoutError` → `timeout` with partial bytes retained, `ECONNREFUSED`
+   → `connection-refused`, `UND_ERR_SOCKET`/`ECONNRESET`/`EPIPE` →
+   `connection-reset`, anything else → `harness-error`); `backend-exit` is
+   never emitted here because the executor holds no process handle, and a
+   missing response is never status `0`. Response bodies stream
+   incrementally and never retain past `capture.maxBodyBytes` (Stage 3
+   default 1 MiB, inside the §12 evidence range); over-cap bodies stay
+   `http-response` with `truncated: true` + `capName`, and JSON parses only
+   fully-captured bodies under `capture.maxParseBytes`, so malformed JSON
+   stays an `http-response` with a recorded reason. `http.body` artifact
+   refs are rejected as `harness-error` (resolving them against a corpus
+   root belongs to a later corpus layer). Readings confirmed during
+   implementation (no schema change): Stage 3 keeps capture in-memory only
+   — the §12 "spill to artifact files" applies to later stages that own
+   artifact directories, not to this executor, which performs no filesystem
+   I/O; undici merges repeated response headers except `set-cookie`
+   (kept split, order preserved), adds transport headers the scenario never
+   declared, forbids `CONNECT`/`TRACE`/`TRACK` and any `GET`/`HEAD` body
+   (those scenarios yield `harness-error`), and exposes `HEAD` bodies as a
+   null stream (zero bytes captured without consulting `Content-Length`);
+   failure details are fixed secret-free templates that never echo header
+   values, bodies, query values, URL userinfo, or thrown error text. Exit
+   criteria met: ordinary responses (GET/HEAD/OPTIONS/DELETE/redirect/
+   chunked/empty/malformed-JSON/at-cap/over-cap) produce valid frozen
+   observations and every transport class stays distinct
+   (`tests/unit/compat-http-executor.test.ts`, 35 tests, loopback only).
+   No backend lifecycle, no auth provisioning, no comparison.
 4. **Reference backend adapter.** `prepare/start/waitReady/stop/health` for the
    Node backend per §11 (env shape §1.1, readiness §1.1, provisioning §1.2,
    cleanup §12). Exit: one-command run of §14 examples against an
