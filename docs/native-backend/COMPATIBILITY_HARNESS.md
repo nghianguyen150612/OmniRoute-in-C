@@ -857,10 +857,39 @@ the data model.
    observations and every transport class stays distinct
    (`tests/unit/compat-http-executor.test.ts`, 35 tests, loopback only).
    No backend lifecycle, no auth provisioning, no comparison.
-4. **Reference backend adapter.** `prepare/start/waitReady/stop/health` for the
-   Node backend per §11 (env shape §1.1, readiness §1.1, provisioning §1.2,
-   cleanup §12). Exit: one-command run of §14 examples against an
-   adapter-managed reference backend; orphan check clean.
+4. **Reference backend adapter — IMPLEMENTED (Task 009).** Entry point
+   `ReferenceBackend.prepare()` in `native/compat/referenceAdapter.ts`:
+   `prepare` (mkdtemp `DATA_DIR`, free loopback port, random per-run
+   secrets, deliberate child env) → `start` (direct `spawn()` of
+   `scripts/dev/run-next.mjs dev`, PID-owned, never name-matched) →
+   `waitReady` (bounded two-phase `GET /api/health` then
+   `GET /api/health/ping`, exit-aware) → `baseUrl` (ready-gated) →
+   `health`/`describe` → `stop` (`SIGTERM` → grace → `SIGKILL` on the owned
+   PID plus starttime-verified descendants only). Lifecycle states are
+   explicit (`prepared → starting → ready → stopping → stopped`, plus
+   `failed`); duplicate start, pre-start readiness, pre-ready base URL, and
+   post-stop start are rejected; `stop()` is idempotent and safe from
+   cleanup paths after partial-startup failure. `run-next.mjs` (not the
+   playwright runner) is used deliberately so auth semantics stay genuine;
+   `OMNIROUTE_E2E_BOOTSTRAP_MODE=open` is not set. Operator port `20128`
+   is refused at prepare time and the tests prove a bystander process
+   survives adapter stop. The free-port reservation keeps the §12 residual
+   race (reserve-then-release-then-bind); a lost race surfaces as
+   `early-exit`/`readiness-timeout`, never as traffic to a wrong server.
+   Logs are 200-line in-memory rings per stream with last-40-line redacted
+   tails; generated secrets are replaced with `[redacted]` before exposure
+   and `describe()` carries a fixed non-secret key allowlist. Credential
+   preparation lives here as the explicit `provisionApiKey()` operation
+   (login → CSRF → create-key against the isolated backend only, key in
+   memory, failures carry statuses never bodies); provider credentials are
+   out of scope and background services are disabled so no upstream is
+   contacted. `httpExecutor.ts` is untouched and backend-agnostic. Exit
+   criteria met: one real isolated reference boot reaches ready, one
+   adapter → Task 008 executor proof (`GET /api/health` → valid
+   `http-response` observation) passes, one runtime key is provisioned, and
+   stop leaves no child/descendant/listener or temp dir
+   (`tests/unit/compat-reference-adapter.test.ts`, 22 tests: 21 fixture +
+   1 real boot, loopback only). No native adapter, no comparison.
 5. **Status + header comparison.** Comparator for §7 policies + `error-triple`
    checks + no-stack-leak oracle (§8.3). Exit: §14.2–14.6 verdicts (pass) on
    reference-vs-reference runs; injected header/status mutations fail with
