@@ -41,29 +41,40 @@ if(OMNIROUTE_SANITIZE AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
   message(FATAL_ERROR "OMNIROUTE_SANITIZE=ON requires -DCMAKE_BUILD_TYPE=Debug")
 endif()
 
+add_library(omni_arena STATIC
+  src/arena.c)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
 
+target_include_directories(omni_arena PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
-# Strong warning set for GCC and Clang; warnings are errors on this target.
-# Kept to flags with stable cross-compiler behavior (no experimental noise).
-if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-  target_compile_options(omniroute-native PRIVATE
-    -Wall -Wextra -Wpedantic -Werror
-    -Wshadow
-    -Wstrict-prototypes
-    -Wold-style-definition
-    -Wconversion)
-endif()
+# Strong warning set for GCC and Clang; warnings are errors on every native
+# target. Kept to flags with stable cross-compiler behavior (no experimental
+# noise).
+set(OMNI_STRICT_WARNINGS
+  -Wall -Wextra -Wpedantic -Werror
+  -Wshadow
+  -Wstrict-prototypes
+  -Wold-style-definition
+  -Wconversion)
 
-if(OMNIROUTE_SANITIZE)
-  target_compile_options(omniroute-native PRIVATE
-    -fsanitize=address,undefined -fno-omit-frame-pointer)
-  target_link_options(omniroute-native PRIVATE
-    -fsanitize=address,undefined)
-endif()
+function(omni_apply_native_flags target)
+  if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(${target} PRIVATE ${OMNI_STRICT_WARNINGS})
+  endif()
+  if(OMNIROUTE_SANITIZE)
+    target_compile_options(${target} PRIVATE
+      -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(${target} PRIVATE
+      -fsanitize=address,undefined)
+  endif()
+endfunction()
+
+omni_apply_native_flags(omni_arena)
+omni_apply_native_flags(omniroute-native)
 
 include(CTest)
 add_subdirectory(tests)

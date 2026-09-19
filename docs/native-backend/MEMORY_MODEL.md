@@ -323,6 +323,11 @@ recovery RSS: …  VmHWM: …  Threads: …  FDs: …
 - Per-request arena: cap ingest (e.g. 8 MiB default, matching the TS clamp
   floor) + bounded stream buffers (e.g. 16–64 KiB per direction, mirroring
   the 16k HWM) + explicit spill-to-tempfile above threshold.
+  - Arena primitive implemented (Task 012, `native/src/arena.c`,
+    `omni_arena_*`): explicit finite capacity, clean NULL failure on
+    exhaustion, no growth, no heap fallback, address-based alignment,
+    reset-to-reuse, borrowed-or-single-owned backing. Request wiring comes
+    with the first slice; until then this is the primitive only.
 - Caches: global byte budget (e.g. single-digit MiB default on iOS, higher
   on Linux via config), per-cache caps, idle eviction; heavy caches
   (catalog, embeddings) releasable.

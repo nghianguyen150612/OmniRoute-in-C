@@ -95,6 +95,37 @@ zero). No threads, no polling, no dependencies, no heap allocation in the
 measurement path. This is process-level observation, not allocator
 accounting (no allocator exists yet by design).
 
+## Arena allocator (Task 012)
+
+Bounded bump allocator for future request-scoped allocations
+(`include/omniroute/arena.h`, `src/arena.c`, unit-tested by
+`tests/test_arena.c` — 73 checks via CTest `arena-unit`).
+
+- **Capacity**: explicit and finite at init; exhaustion returns NULL. No
+  growth, no heap fallback, no hidden block chains.
+- **Backing**: borrowed caller buffer (`omni_arena_init_borrowed`) or one
+  owned allocation made at init and released at destroy
+  (`omni_arena_init_owned`). Steady-state allocation never calls malloc.
+- **Lifetime**: allocations stay valid until reset/destroy. No individual
+  free. Reset rewinds `used` to zero, keeps backing and capacity, does not
+  clear contents (no erasure guarantee). Destroy frees owned backing
+  exactly once, never borrowed storage; NULL, inert, and repeated destroy
+  are safe no-ops.
+- **Alignment**: explicit power-of-two parameter, computed from the absolute
+  address (odd caller buffers still yield aligned pointers); invalid
+  alignment returns NULL. Default: `OMNI_ARENA_ALIGN_DEFAULT`
+  (`_Alignof(max_align_t)`). All padding/offset arithmetic is
+  subtraction-first and overflow-safe (SIZE_MAX requests fail on bounds
+  alone; no giant buffer is ever attempted).
+- **Zero-size**: returns the aligned current position, consumes nothing.
+- **Accounting**: `capacity` / `used` / `remaining` / lifetime-max
+  `high_water`, all local to the arena. Failed allocations change nothing.
+- **Threads**: none — single-owner, externally synchronized by contract.
+
+`main` does not instantiate an arena (separate static lib linked only into
+the test executable), so the Task 011 RSS baseline below is unaffected by
+this task — and no arena-efficiency claim is drawn from it.
+
 ## Initial baseline (Task 011, measured 2026-09-19)
 
 Environment: Linux 7.2.4-zen2 x86_64, 8 CPUs, 16 GiB RAM; GCC 16.2.1,
@@ -112,6 +143,10 @@ Not a competition with the full Node server (200–400 MB idle RSS at
 `OMNIROUTE_MEMORY_MB=512` covers hundreds of routes, providers, and
 caches this skeleton does not have). These numbers exist so future slices
 can detect regressions from day one.
+
+Task 012 regression: unchanged — 16,640 bytes, RSS 1,748 kB, peak
+1,748 kB (`nm` confirms no arena symbols in `omniroute-native`; the arena
+lives in a separate static lib linked only into `test_arena`).
 
 ## Platform boundary
 

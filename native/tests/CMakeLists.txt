@@ -65,3 +65,12 @@ add_test(NAME no-network-calls-in-sources
   COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/check_no_network.sh"
     "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set_tests_properties(no-network-calls-in-sources PROPERTIES TIMEOUT 30)
+
+# Bounded arena allocator unit tests (Task 012): self-contained C program,
+# deterministic output, nonzero exit on failure. Inherits the strict warning
+# set and sanitizer flags via the parent-scope helper.
+add_executable(test_arena test_arena.c)
+target_link_libraries(test_arena PRIVATE omni_arena)
+omni_apply_native_flags(test_arena)
+add_test(NAME arena-unit COMMAND test_arena)
+set_tests_properties(arena-unit PROPERTIES TIMEOUT 60)
