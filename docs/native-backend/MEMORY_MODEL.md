@@ -333,8 +333,11 @@ recovery RSS: …  VmHWM: …  Threads: …  FDs: …
     and incremental parsing — linear read/write offsets, hard cap with no
     growth path, tail-only append (explicit compact, never implicit),
     zero-copy read/write views, commit/consume/compact/reset, borrowed-or-
-    single-owned backing, lifetime high-water. Parser/socket wiring comes
-    with a later slice; until then this is the primitive only.
+    single-owned backing, lifetime high-water. Task 017 adds
+    `native/src/recv.c` as the allocation-free consumer: one nonblocking
+    `recv()` writes directly into the writable tail and commits the exact
+    positive count; bounded drain, EOF, would-block, buffer-full, and fatal
+    receive outcomes remain explicit. HTTP/parser wiring is still later.
 - Caches: global byte budget (e.g. single-digit MiB default on iOS, higher
   on Linux via config), per-cache caps, idle eviction; heavy caches
   (catalog, embeddings) releasable.

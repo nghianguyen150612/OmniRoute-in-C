@@ -115,3 +115,15 @@ target_link_libraries(test_accepted PRIVATE omni_accepted omni_listener omni_pol
 omni_apply_native_flags(test_accepted)
 add_test(NAME accepted-unit COMMAND test_accepted)
 set_tests_properties(accepted-unit PROPERTIES TIMEOUT 120)
+
+# Bounded nonblocking socket receive tests (Task 017): one-shot receive,
+# bounded drain, buffer-full/partial/EOF/RST paths, poller integration,
+# deterministic stress. Loopback-only, self-cleaning, no external
+# network. First suite allowed to move payload bytes (test client sends
+# only; production receives only). Same strict-warning/sanitizer
+# treatment as the other suites.
+add_executable(test_recv test_recv.c)
+target_link_libraries(test_recv PRIVATE omni_recv omni_accepted omni_listener omni_poller omni_bytebuf)
+omni_apply_native_flags(test_recv)
+add_test(NAME recv-unit COMMAND test_recv)
+set_tests_properties(recv-unit PROPERTIES TIMEOUT 120)

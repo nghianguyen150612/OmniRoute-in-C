@@ -69,6 +69,13 @@ add_library(omni_poller STATIC
 add_library(omni_accepted STATIC
   src/accepted.c)
 
+# Bounded nonblocking socket receive lives in its own static lib, linked
+# only into the receive tests: omniroute-native stays free of payload I/O
+# until a later server-runtime task deliberately wires it in.
+
+add_library(omni_recv STATIC
+  src/recv.c)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
@@ -78,6 +85,7 @@ target_include_directories(omni_bytebuf PUBLIC include)
 target_include_directories(omni_listener PUBLIC include)
 target_include_directories(omni_poller PUBLIC include)
 target_include_directories(omni_accepted PUBLIC include)
+target_include_directories(omni_recv PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 # Strong warning set for GCC and Clang; warnings are errors on every native
@@ -107,6 +115,7 @@ omni_apply_native_flags(omni_bytebuf)
 omni_apply_native_flags(omni_listener)
 omni_apply_native_flags(omni_poller)
 omni_apply_native_flags(omni_accepted)
+omni_apply_native_flags(omni_recv)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)
