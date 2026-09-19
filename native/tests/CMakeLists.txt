@@ -95,3 +95,12 @@ target_link_libraries(test_listener PRIVATE omni_listener)
 omni_apply_native_flags(test_listener)
 add_test(NAME listener-unit COMMAND test_listener)
 set_tests_properties(listener-unit PROPERTIES TIMEOUT 120)
+
+# Bounded readiness tests (Task 015): generic-FD behavior plus one
+# loopback listener integration proof. Self-cleaning, no external
+# network. Same strict-warning/sanitizer treatment as the other suites.
+add_executable(test_poller test_poller.c)
+target_link_libraries(test_poller PRIVATE omni_poller omni_listener)
+omni_apply_native_flags(test_poller)
+add_test(NAME poller-unit COMMAND test_poller)
+set_tests_properties(poller-unit PROPERTIES TIMEOUT 120)

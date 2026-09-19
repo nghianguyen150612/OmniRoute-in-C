@@ -45,16 +45,18 @@ no `-march=native`, no LTO.
 native/
   README.md                  # this file (build matrix, behavior, baseline)
   CMakeLists.txt             # Linux-first build described above
-  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h
+  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h
   src/
     main.c                   # entry point, tiny CLI, lifecycle
     meminfo.c                # Linux /proc/self/status RSS hook (+ stub elsewhere)
     arena.c                  # bounded arena allocator (Task 012)
     bytebuf.c                # bounded reusable byte buffer (Task 013)
     listener.c               # loopback TCP listener lifecycle (Task 014)
+    poller.c                 # bounded readiness wait (Task 015)
   tests/
     CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
-    check_network_boundary.sh  # review gate: networking confined to src/listener.c,
+    check_network_boundary.sh  # review gate: networking confined to src/listener.c
+                             # (socket lifecycle) + src/poller.c (readiness wait),
                              # deferred layers (accept/loop/IO/threads/TLS) banned
                              # everywhere in production sources
 ```
@@ -205,18 +207,63 @@ SOCK_CLOEXEC`, verified after creation (fails closed); `SO_REUSEADDR`
 `test_listener`), so the Task 011 baseline below still describes a
 socket-free executable — and no listener-overhead claim is drawn from it.
 
+## Bounded readiness (Task 015)
+
+Portable readiness observation over borrowed descriptors
+(`include/omniroute/poller.h`, `src/poller.c`, unit-tested by
+`tests/test_poller.c` — 130 checks via CTest `poller-unit`, plus one
+loopback-listener integration proof).
+
+- **Backend**: POSIX readiness wait first — small, auditable, portable —
+  not epoll/select/io_uring/kqueue. A later task may replace or augment
+  the mechanism after profiling; the registration contract stays.
+- **Bounds**: explicit finite capacity at init (zero rejected); dense live
+  prefix, no growth, no realloc; beyond capacity registration fails with
+  state unchanged. Caller-provided parallel arrays or exactly one owned
+  block at init (arena/bytebuf dual-model symmetry); steady-state
+  add/remove/update/wait/reset/destroy never allocate.
+- **Borrowed FDs**: the poller never closes, dups, or reconfigures a
+  descriptor. Owners keep lifetime control; the owner must remove a
+  registration before closing/recycling its FD (descriptor numbers can be
+  reused). Destroy/reset/remove close nothing — proven by fd-census and
+  bystander checks, including listener-usable-after-poller-destroy.
+- **Identity**: caller-provided opaque 64-bit token per registration,
+  round-tripped in every event; duplicate-FD registration rejected.
+- **Masks**: project-level interest (readable/writable; empty/unknown
+  rejected) and readiness (readable/writable/error/hangup/invalid).
+  Error/hangup/invalid surface even when unrequested; urgent-data
+  signaling is documented as not yet surfaced.
+- **Wait**: caller-owned event array + capacity; capacity must cover every
+  live registration or the wait fails without polling — never truncated,
+  never overrun (ASan-proven). Events emit in registration order.
+  Timeout is int64 milliseconds: 0 probes, positive bounds, negatives
+  and values above `INT_MAX` rejected (no infinite wait without a wakeup
+  mechanism). Empty poller returns zero events immediately.
+- **Interruption**: an interrupted wait returns `INTERRUPTED` with
+  nothing consumed — never retried internally (self-signal tested).
+- **Stale FDs**: externally closed descriptors surface as invalid
+  readiness; nothing is auto-closed or auto-removed.
+- **Not this task**: no accept path, no connection objects, no payload
+  input/output, no callbacks, no wakeup FD, no threads, no HTTP.
+- **Boundary gate**: `check_network_boundary.sh` now also confines the
+  readiness-wait token to `src/poller.c`.
+
+`main` never instantiates a poller (separate static lib linked only into
+`test_poller`), so the Task 011 baseline below is unaffected by this
+task — and no readiness-overhead claim is drawn from it.
+
 ## Initial baseline (Task 011, measured 2026-09-19)
 
 Environment: Linux 7.2.4-zen2 x86_64, 8 CPUs, 16 GiB RAM; GCC 16.2.1,
 Clang 22.1.8; Release + Debug builds from this tree.
 
-| Metric                              | Value                                                                      |
-| ----------------------------------- | -------------------------------------------------------------------------- |
-| Executable size (Release, GCC)      | 16,640 bytes (`text+data+bss` ≈ 4.8 KiB)                                   |
-| Executable size (Debug, GCC)        | 22,504 bytes                                                               |
-| Startup/current RSS (`--meminfo`)   | ≈ 1,748 kB (one-shot print-and-exit, not a server)                         |
-| Peak RSS (`VmHWM`)                  | ≈ 1,748 kB                                                                 |
-| Explicit heap allocation in sources | none (`malloc/calloc/realloc/free/strdup` absent; libc internals excluded) |
+| Metric                              | Value                                                                                                                                                               |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Executable size (Release, GCC)      | 16,640 bytes (`text+data+bss` ≈ 4.8 KiB)                                                                                                                            |
+| Executable size (Debug, GCC)        | 22,504 bytes                                                                                                                                                        |
+| Startup/current RSS (`--meminfo`)   | ≈ 1,748 kB (one-shot print-and-exit, not a server)                                                                                                                  |
+| Peak RSS (`VmHWM`)                  | ≈ 1,748 kB                                                                                                                                                          |
+| Explicit heap allocation in sources | init-time only: exactly one owned backing block each in arena / bytebuf / poller owned-init paths; steady-state operations never allocate (libc internals excluded) |
 
 Not a competition with the full Node server (200–400 MB idle RSS at
 `OMNIROUTE_MEMORY_MB=512` covers hundreds of routes, providers, and
@@ -239,6 +286,11 @@ Task 014 regression: unchanged — 16,640 bytes, RSS ≈ 1,748 kB, peak
 only into `test_listener`, and `main` binds nothing). RSS samples
 1,748–1,752 kB across runs (same one-shot variance).
 
+Task 015 regression: unchanged — 16,640 bytes, RSS 1,748 kB, peak
+1,748 kB (`nm` confirms no poller, listener, socket, bind, or readiness
+symbols in `omniroute-native`; the poller lives in a separate static lib
+linked only into `test_poller`, and `main` waits on nothing).
+
 ## Platform boundary
 
 Linux x86_64/arm64 is the build target; the `/proc` reader is the only
@@ -252,6 +304,6 @@ from the migration design happens when iOS work starts.
 Event loop (epoll/io_uring/threads), accept path and connection objects,
 socket payload input/output, HTTP, `/health`, `/v1/models`, TLS, SQLite,
 crypto, auth, providers, routing, streaming, compression, MCP, A2A,
-Objective-C/Swift/assembly. (Arenas, byte buffers, and listener lifecycle
-are landed primitives now — see above.) Each remaining item gets its own
-reviewable task.
+Objective-C/Swift/assembly. (Arenas, byte buffers, listener lifecycle,
+and readiness observation are landed primitives now — see above.) Each
+remaining item gets its own reviewable task.
