@@ -890,10 +890,27 @@ the data model.
    stop leaves no child/descendant/listener or temp dir
    (`tests/unit/compat-reference-adapter.test.ts`, 22 tests: 21 fixture +
    1 real boot, loopback only). No native adapter, no comparison.
-5. **Status + header comparison.** Comparator for §7 policies + `error-triple`
-   checks + no-stack-leak oracle (§8.3). Exit: §14.2–14.6 verdicts (pass) on
-   reference-vs-reference runs; injected header/status mutations fail with
-   exact paths.
+5. **Status + header comparison — PARTIALLY IMPLEMENTED (Task 010: status +
+   headers only).** Entry point `compareStatusAndHeaders()` in
+   `native/compat/statusHeaderCompare.ts`: one loaded scenario + reference
+   observation + native observation → deterministic `CompatMismatch` records
+   for the status/headers dimensions (a later orchestration stage assembles
+   them into a `CompatResult`; no verdict/report logic lives here). Status
+   compares exactly against declared `compare.status` on both sides (no
+   class grouping, no normalization, never `0`); undeclared status yields
+   nothing. Headers compare as case-insensitive-name multisets over the
+   closed `exact`/`presence`/`absent`/`ignore`/`prefix:`/`contains:` catalog
+   (§7.2), selected-headers only, `prefix`/`contains` holding over every
+   value on both sides, `normalized: false` throughout. Any non-HTTP outcome
+   returns explicit `comparable: false` (`non-http-outcome`); unknown rule
+   strings return `unknown-header-rule` — never invented mismatches, never
+   silent equality. Ordering is status-first then header-name sorted;
+   summaries are 300-char bounded. Pure functions, no I/O, inputs never
+   mutated. Exit criteria met: Task 004 HEAD/OPTIONS/308/missing-header
+   predicates expressible in-memory plus full rule/edge coverage
+   (`tests/unit/compat-status-header-compare.test.ts`, 42 tests, no
+   server/network/process). NOT implemented here: `error-triple` checks and
+   the no-stack-leak oracle (§8.3), which remain open inside this stage.
 6. **JSON comparison.** Modes of §8.1 + Models `data`-array rule (§8.2) +
    `catalog-created` normalization. Exit: §14.1 passes reference-vs-reference
    on the seeded fixture; reordered-`data` and dropped-required-field
