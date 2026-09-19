@@ -45,7 +45,7 @@ no `-march=native`, no LTO.
 native/
   README.md                  # this file (build matrix, behavior, baseline)
   CMakeLists.txt             # Linux-first build described above
-  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h
+  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h
   src/
     main.c                   # entry point, tiny CLI, lifecycle
     meminfo.c                # Linux /proc/self/status RSS hook (+ stub elsewhere)
@@ -53,12 +53,15 @@ native/
     bytebuf.c                # bounded reusable byte buffer (Task 013)
     listener.c               # loopback TCP listener lifecycle (Task 014)
     poller.c                 # bounded readiness wait (Task 015)
+    accepted.c               # accepted-socket owner + bounded accept4 drain (Task 016)
   tests/
     CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
-    check_network_boundary.sh  # review gate: networking confined to src/listener.c
-                             # (socket lifecycle) + src/poller.c (readiness wait),
-                             # deferred layers (accept/loop/IO/threads/TLS) banned
-                             # everywhere in production sources
+    check_network_boundary.sh  # review gate: socket setup confined to src/listener.c,
+                              # readiness wait to src/poller.c, accept path plus
+                              # accepted-FD lifecycle to src/accepted.c; deferred
+                              # layers (loop/IO/threads/TLS) banned everywhere in
+                              # production sources, heap allocation banned in
+                              # src/accepted.c
 ```
 
 `compat/` holds the TypeScript harness stages (Tasks 006–010); the C
@@ -252,6 +255,60 @@ loopback-listener integration proof).
 `test_poller`), so the Task 011 baseline below is unaffected by this
 task — and no readiness-overhead claim is drawn from it.
 
+## Accepted socket (Task 016)
+
+Minimal accepted-connection FD owner plus a bounded nonblocking drain
+(`include/omniroute/accepted.h`, `src/accepted.c`, unit-tested by
+`tests/test_accepted.c` — 467 checks via CTest `accepted-unit`,
+loopback-only, self-cleaning, zero payload bytes).
+
+- **Scope**: one owned client descriptor per `omni_accepted`, nothing
+  else — no byte buffers, no arenas, no parser/HTTP state, no peer
+  fields, no threads. The name stays narrow on purpose so a richer
+  future connection runtime can arrive under its own name.
+- **Ownership**: single accept borrows the listener descriptor and
+  publishes ownership only after `accept4` succeeds and the new
+  descriptor verifies `O_NONBLOCK` plus `FD_CLOEXEC`. Failed attempts
+  publish nothing; the success-but-unverified path closes the new
+  descriptor exactly once and leaves the destination inert. Destroy
+  closes exactly the owned client descriptor once (single close, never
+  retried — same policy as the listener), never the listener or a
+  bystander. Invalid sentinel is `-1`; descriptor `0` is valid
+  (proven by a fork-isolated FD-0 acceptance test).
+- **Mechanism**: Linux `accept4` with atomic `SOCK_NONBLOCK |
+SOCK_CLOEXEC`; the POSIX fallback for other platforms is deferred,
+  not implemented. No reverse lookup, no payload input/output.
+- **Taxonomy**: `OK`, `DRAINED` (would-block is normal control flow),
+  `INTERRUPTED` (surfaced, never retried internally),
+  `TRANSIENT` (`ECONNABORTED`/`EPROTO` name a failed pending
+  handshake; the only per-connection-abort evidence at this layer),
+  `CAPACITY`, `ERR_INVALID` (caller-contract violations, checked
+  before any wait), `ERR_FATAL`. Every result carries the stop-point
+  errno plus the published count.
+- **Bounded drain**: caller-owned output plus explicit capacity; stops
+  on drained, full, interrupted, transient, or fatal — never exceeds
+  capacity, never allocates (heap calls are banned in `src/accepted.c`
+  by the boundary gate). Capacity-reached reports distinctly from
+  queue-drained so the future runtime revisits listener readiness.
+  Partial success keeps its owners: already published entries stay
+  live and owned by the caller whatever stops the call. Every output
+  slot must already be inert (verified before accepting) so a stray
+  live owner can never be overwritten; only the published prefix
+  becomes live, the tail is left untouched.
+- **Integration proof**: listener → poller READ readiness → bounded
+  drain, with the poller borrowing only the listener descriptor
+  throughout; an accepted descriptor separately proves it can later
+  register as a borrowed writable FD with no payload transferred.
+- **Boundary gate**: `check_network_boundary.sh` now confines socket
+  setup to `src/listener.c`, descriptor lifecycle to `src/listener.c`
+  - `src/accepted.c`, the readiness wait to `src/poller.c`, and the
+    accept path to `src/accepted.c` — with heap allocation banned in
+    `src/accepted.c` as a negative control.
+
+`main` never accepts (separate static lib linked only into
+`test_accepted`), so the Task 011 baseline below is unaffected by this
+task — and no accept-overhead claim is drawn from it.
+
 ## Initial baseline (Task 011, measured 2026-09-19)
 
 Environment: Linux 7.2.4-zen2 x86_64, 8 CPUs, 16 GiB RAM; GCC 16.2.1,
@@ -291,6 +348,12 @@ Task 015 regression: unchanged — 16,640 bytes, RSS 1,748 kB, peak
 symbols in `omniroute-native`; the poller lives in a separate static lib
 linked only into `test_poller`, and `main` waits on nothing).
 
+Task 016 regression: unchanged — 16,640 bytes, RSS 1,748 kB, peak
+1,748 kB (`nm` confirms no accepted, poller, listener, socket, bind, or
+readiness symbols in `omniroute-native`; the accept layer lives in a
+separate static lib linked only into `test_accepted`, and `main` accepts
+nothing).
+
 ## Platform boundary
 
 Linux x86_64/arm64 is the build target; the `/proc` reader is the only
@@ -305,5 +368,6 @@ Event loop (epoll/io_uring/threads), accept path and connection objects,
 socket payload input/output, HTTP, `/health`, `/v1/models`, TLS, SQLite,
 crypto, auth, providers, routing, streaming, compression, MCP, A2A,
 Objective-C/Swift/assembly. (Arenas, byte buffers, listener lifecycle,
-and readiness observation are landed primitives now — see above.) Each
+readiness observation, and accepted-socket ownership with its bounded
+accept drain are landed primitives now — see above.) Each
 remaining item gets its own reviewable task.

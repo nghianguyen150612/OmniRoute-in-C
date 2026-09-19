@@ -61,6 +61,14 @@ add_library(omni_listener STATIC
 add_library(omni_poller STATIC
   src/poller.c)
 
+# Accepted-socket ownership plus the bounded accept4 drain live in their own
+# static lib, linked only into the accepted tests: omniroute-native stays
+# free of accept machinery until a later server-runtime task deliberately
+# wires it in.
+
+add_library(omni_accepted STATIC
+  src/accepted.c)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
@@ -69,6 +77,7 @@ target_include_directories(omni_arena PUBLIC include)
 target_include_directories(omni_bytebuf PUBLIC include)
 target_include_directories(omni_listener PUBLIC include)
 target_include_directories(omni_poller PUBLIC include)
+target_include_directories(omni_accepted PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 # Strong warning set for GCC and Clang; warnings are errors on every native
@@ -97,6 +106,7 @@ omni_apply_native_flags(omni_arena)
 omni_apply_native_flags(omni_bytebuf)
 omni_apply_native_flags(omni_listener)
 omni_apply_native_flags(omni_poller)
+omni_apply_native_flags(omni_accepted)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)
