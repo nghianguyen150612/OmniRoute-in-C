@@ -44,11 +44,15 @@ endif()
 add_library(omni_arena STATIC
   src/arena.c)
 
+add_library(omni_bytebuf STATIC
+  src/bytebuf.c)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
 
 target_include_directories(omni_arena PUBLIC include)
+target_include_directories(omni_bytebuf PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 # Strong warning set for GCC and Clang; warnings are errors on every native
@@ -74,6 +78,7 @@ function(omni_apply_native_flags target)
 endfunction()
 
 omni_apply_native_flags(omni_arena)
+omni_apply_native_flags(omni_bytebuf)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)

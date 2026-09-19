@@ -328,6 +328,13 @@ recovery RSS: …  VmHWM: …  Threads: …  FDs: …
     exhaustion, no growth, no heap fallback, address-based alignment,
     reset-to-reuse, borrowed-or-single-owned backing. Request wiring comes
     with the first slice; until then this is the primitive only.
+  - Byte-buffer primitive implemented (Task 013, `native/src/bytebuf.c`,
+    `omni_bytebuf_*`): bounded reusable staging for future socket receive
+    and incremental parsing — linear read/write offsets, hard cap with no
+    growth path, tail-only append (explicit compact, never implicit),
+    zero-copy read/write views, commit/consume/compact/reset, borrowed-or-
+    single-owned backing, lifetime high-water. Parser/socket wiring comes
+    with a later slice; until then this is the primitive only.
 - Caches: global byte budget (e.g. single-digit MiB default on iOS, higher
   on Linux via config), per-cache caps, idle eviction; heavy caches
   (catalog, embeddings) releasable.

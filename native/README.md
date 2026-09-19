@@ -126,6 +126,45 @@ Bounded bump allocator for future request-scoped allocations
 the test executable), so the Task 011 RSS baseline below is unaffected by
 this task — and no arena-efficiency claim is drawn from it.
 
+## Byte buffer (Task 013)
+
+Bounded reusable byte staging for future socket receive staging and
+incremental parsing (`include/omniroute/bytebuf.h`, `src/bytebuf.c`,
+unit-tested by `tests/test_bytebuf.c` — 202 checks via CTest
+`bytebuf-unit`, including a 400-op deterministic invariant stress test).
+
+- **Hard cap**: explicit finite capacity at init (zero capacity rejected,
+  symmetric with the arena). No growth path exists — no realloc, no chunks,
+  no spill, no heap fallback. Exhaustion fails cleanly with state unchanged.
+- **State**: linear `read`/`write` offsets, invariant
+  `read <= write <= capacity` (linear, not a ring: MEMORY_MODEL §2.5 and
+  MIGRATION_PLAN §1 mention ring/chain buffers only as future sketches, so
+  the auditable linear + explicit-compact form stands until a consumer
+  proves otherwise). Consumed prefix, readable region, contiguous free tail.
+- **Backing**: borrowed caller storage or one owned allocation at init
+  (`init_borrowed` / `init_owned`); steady-state operations never allocate.
+  Destroy frees owned backing exactly once, never borrowed storage.
+- **Views**: zero-copy readable (`read_ptr` + length; NULL when empty) and
+  writable tail (`write_ptr` + length; NULL when full) for a future socket
+  read placed directly into storage — no I/O here. Views are borrowed and
+  invalidate on append/commit/consume/compact/reset/destroy.
+- **Mutation**: `commit` advances the write side after external fill;
+  `append` copies caller bytes tail-only (no implicit compaction —
+  `consume` a prefix then `compact` first); `consume` advances the read
+  side (full consume canonicalizes to `read == write == 0`); `compact`
+  memmoves unread bytes to the start (the only O(n) op, always explicit).
+  Append overlap is safe by construction (memmove snapshot semantics).
+- **Bytes, not strings**: no NUL appended, no text assumption; embedded
+  zeros round-trip. `reset` reuses backing without clearing (no erasure
+  guarantee). `high_water` tracks peak readable across reset.
+- **Safety**: subtraction-first bounds throughout (near-`SIZE_MAX` inputs
+  fail on bounds alone); NULL/inert/destroyed inputs fail safe or no-op.
+- **Threads**: none — single-owner, externally synchronized by contract.
+
+`main` does not instantiate a buffer (separate static lib linked only into
+`test_bytebuf`), so the Task 011 RSS baseline below is unaffected by this
+task — and no buffer-efficiency claim is drawn from it.
+
 ## Initial baseline (Task 011, measured 2026-09-19)
 
 Environment: Linux 7.2.4-zen2 x86_64, 8 CPUs, 16 GiB RAM; GCC 16.2.1,
@@ -147,6 +186,12 @@ can detect regressions from day one.
 Task 012 regression: unchanged — 16,640 bytes, RSS 1,748 kB, peak
 1,748 kB (`nm` confirms no arena symbols in `omniroute-native`; the arena
 lives in a separate static lib linked only into `test_arena`).
+
+Task 013 regression: unchanged — 16,640 bytes, RSS ≈ 1,748 kB, peak
+≈ 1,748 kB (`nm` confirms no arena or bytebuf symbols in
+`omniroute-native`; the buffer lives in a separate static lib linked only
+into `test_bytebuf`). RSS samples 1,748–1,752 kB across runs (one-shot
+print-and-exit variance, same qualification as the Task 011 baseline).
 
 ## Platform boundary
 

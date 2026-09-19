@@ -74,3 +74,12 @@ target_link_libraries(test_arena PRIVATE omni_arena)
 omni_apply_native_flags(test_arena)
 add_test(NAME arena-unit COMMAND test_arena)
 set_tests_properties(arena-unit PROPERTIES TIMEOUT 60)
+
+# Bounded reusable byte buffer unit tests (Task 013): self-contained C
+# program, deterministic output, nonzero exit on failure. Same conventions
+# as the arena suite (no randomness, no network, no giant buffers).
+add_executable(test_bytebuf test_bytebuf.c)
+target_link_libraries(test_bytebuf PRIVATE omni_bytebuf)
+omni_apply_native_flags(test_bytebuf)
+add_test(NAME bytebuf-unit COMMAND test_bytebuf)
+set_tests_properties(bytebuf-unit PROPERTIES TIMEOUT 60)
