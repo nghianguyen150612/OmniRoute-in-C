@@ -1,0 +1,58 @@
+name: Native Build
+
+# Minimal Task 011 anti-rot job: configure + compile + test the C skeleton on
+# Linux across compilers and build types. Isolated workflow so no frontend or
+# Node job depends on the native binary.
+
+on:
+  push:
+    paths:
+      - "native/**"
+      - ".github/workflows/native-build.yml"
+  pull_request:
+    paths:
+      - "native/**"
+      - ".github/workflows/native-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Native skeleton (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang
+
+      - name: Build and test (GCC, Debug + Release)
+        run: |
+          cmake -S native -B native/build-debug-gcc -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=gcc
+          cmake --build native/build-debug-gcc
+          ctest --test-dir native/build-debug-gcc --output-on-failure
+          cmake -S native -B native/build-release-gcc -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc
+          cmake --build native/build-release-gcc
+          ctest --test-dir native/build-release-gcc --output-on-failure
+
+      - name: Build and test (Clang, Debug + Release)
+        run: |
+          cmake -S native -B native/build-debug-clang -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang
+          cmake --build native/build-debug-clang
+          ctest --test-dir native/build-debug-clang --output-on-failure
+          cmake -S native -B native/build-release-clang -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang
+          cmake --build native/build-release-clang
+          ctest --test-dir native/build-release-clang --output-on-failure
+
+      - name: Sanitizers (GCC, Debug, ASan + UBSan)
+        run: |
+          cmake -S native -B native/build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=gcc -DOMNIROUTE_SANITIZE=ON
+          cmake --build native/build-asan
+          ctest --test-dir native/build-asan --output-on-failure

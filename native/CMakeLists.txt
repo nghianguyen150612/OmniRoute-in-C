@@ -1,0 +1,69 @@
+# OmniRoute native backend — Linux-first CMake build (Task 011 foundation).
+#
+# Design: docs/native-backend/MIGRATION_PLAN.md section 1
+# (`native/CMakeLists.txt`, iOS toolchain file arrives with iOS work).
+#
+# Out-of-tree only; in-tree object files are never produced:
+#   cmake -S native -B native/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+#   cmake --build native/build
+#   ctest --test-dir native/build --output-on-failure
+#
+# Compiler selection is explicit (no surprises):
+#   CC=clang cmake -S native -B native/build-clang ...
+#   cmake -S native -B native/build -DCMAKE_C_COMPILER=gcc ...
+#
+# Sanitizers (Debug only, never Release):
+#   cmake -S native -B native/build-asan -DOMNIROUTE_SANITIZE=ON \
+#     -DCMAKE_BUILD_TYPE=Debug
+
+cmake_minimum_required(VERSION 3.21)
+
+project(omniroute-native
+  VERSION 0.1.0
+  DESCRIPTION "OmniRoute native backend executable skeleton"
+  LANGUAGES C)
+
+# Conservative portable baseline: C11 is the newest standard guaranteed by
+# GCC, Clang, and the older Apple Clang behind the iOS 12 SDK. Strict ISO
+# (no GNU extensions) so Linux-only code stays behind explicit #ifdefs.
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+
+# Portable optimization: explicit -O2, no -ffast-math, no -march=native,
+# no LTO. Tuning comes later with measurements.
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG" CACHE STRING "" FORCE)
+endif()
+
+option(OMNIROUTE_SANITIZE "Enable AddressSanitizer + UndefinedBehaviorSanitizer (Debug only)" OFF)
+if(OMNIROUTE_SANITIZE AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+  message(FATAL_ERROR "OMNIROUTE_SANITIZE=ON requires -DCMAKE_BUILD_TYPE=Debug")
+endif()
+
+add_executable(omniroute-native
+  src/main.c
+  src/meminfo.c)
+
+target_include_directories(omniroute-native PRIVATE include)
+
+# Strong warning set for GCC and Clang; warnings are errors on this target.
+# Kept to flags with stable cross-compiler behavior (no experimental noise).
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(omniroute-native PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+    -Wshadow
+    -Wstrict-prototypes
+    -Wold-style-definition
+    -Wconversion)
+endif()
+
+if(OMNIROUTE_SANITIZE)
+  target_compile_options(omniroute-native PRIVATE
+    -fsanitize=address,undefined -fno-omit-frame-pointer)
+  target_link_options(omniroute-native PRIVATE
+    -fsanitize=address,undefined)
+endif()
+
+include(CTest)
+add_subdirectory(tests)

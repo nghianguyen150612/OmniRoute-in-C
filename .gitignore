@@ -205,6 +205,9 @@ scripts/i18n/_pending-keys.json
 .claude/worktrees/
 .codegraph/
 
+# Native backend out-of-tree builds (never commit; fully reproducible)
+native/build*/
+
 # Test executable shims belong in the OS temporary directory, not the repository root
 /.fakebin-*/
 
