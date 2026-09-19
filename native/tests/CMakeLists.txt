@@ -59,12 +59,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     PASS_REGEX "rss_kb: [0-9]+")
 endif()
 
-# The skeleton must not grow networking: fail if socket-family calls appear
-# in native sources (review gate, cheaper than a runtime syscall audit).
-add_test(NAME no-network-calls-in-sources
-  COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/check_no_network.sh"
+# Networking is confined to src/listener.c (Task 014): fail if socket/FD
+# calls appear anywhere else in production sources, or if deferred layers
+# (accept path, event loop, payload I/O, threads, TLS) appear anywhere at
+# all. Tests under tests/ are intentionally not scanned — the loopback
+# tests legitimately use client-side sockets.
+add_test(NAME network-source-boundary
+  COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/check_network_boundary.sh"
     "${CMAKE_CURRENT_SOURCE_DIR}/..")
-set_tests_properties(no-network-calls-in-sources PROPERTIES TIMEOUT 30)
+set_tests_properties(network-source-boundary PROPERTIES TIMEOUT 30)
 
 # Bounded arena allocator unit tests (Task 012): self-contained C program,
 # deterministic output, nonzero exit on failure. Inherits the strict warning
@@ -83,3 +86,12 @@ target_link_libraries(test_bytebuf PRIVATE omni_bytebuf)
 omni_apply_native_flags(test_bytebuf)
 add_test(NAME bytebuf-unit COMMAND test_bytebuf)
 set_tests_properties(bytebuf-unit PROPERTIES TIMEOUT 60)
+
+# Linux TCP listener lifecycle tests (Task 014): loopback-only,
+# self-cleaning, no external network. Same strict-warning/sanitizer
+# treatment as the other suites.
+add_executable(test_listener test_listener.c)
+target_link_libraries(test_listener PRIVATE omni_listener)
+omni_apply_native_flags(test_listener)
+add_test(NAME listener-unit COMMAND test_listener)
+set_tests_properties(listener-unit PROPERTIES TIMEOUT 120)

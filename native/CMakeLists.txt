@@ -47,12 +47,20 @@ add_library(omni_arena STATIC
 add_library(omni_bytebuf STATIC
   src/bytebuf.c)
 
+# Listener lifecycle lives in its own static lib, linked only into the
+# listener tests: omniroute-native stays a socket-free executable until a
+# later server-runtime task deliberately wires it in.
+
+add_library(omni_listener STATIC
+  src/listener.c)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
 
 target_include_directories(omni_arena PUBLIC include)
 target_include_directories(omni_bytebuf PUBLIC include)
+target_include_directories(omni_listener PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 # Strong warning set for GCC and Clang; warnings are errors on every native
@@ -79,6 +87,7 @@ endfunction()
 
 omni_apply_native_flags(omni_arena)
 omni_apply_native_flags(omni_bytebuf)
+omni_apply_native_flags(omni_listener)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)

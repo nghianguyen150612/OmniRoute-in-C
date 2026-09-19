@@ -45,13 +45,18 @@ no `-march=native`, no LTO.
 native/
   README.md                  # this file (build matrix, behavior, baseline)
   CMakeLists.txt             # Linux-first build described above
-  include/omniroute/         # version.h, exit_code.h, meminfo.h
+  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h
   src/
     main.c                   # entry point, tiny CLI, lifecycle
     meminfo.c                # Linux /proc/self/status RSS hook (+ stub elsewhere)
+    arena.c                  # bounded arena allocator (Task 012)
+    bytebuf.c                # bounded reusable byte buffer (Task 013)
+    listener.c               # loopback TCP listener lifecycle (Task 014)
   tests/
-    CMakeLists.txt           # CTest cases (CLI, meminfo, no-network gate)
-    check_no_network.sh      # review gate: no socket/HTTP/TLS calls in sources
+    CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
+    check_network_boundary.sh  # review gate: networking confined to src/listener.c,
+                             # deferred layers (accept/loop/IO/threads/TLS) banned
+                             # everywhere in production sources
 ```
 
 `compat/` holds the TypeScript harness stages (Tasks 006–010); the C
@@ -165,6 +170,41 @@ unit-tested by `tests/test_bytebuf.c` — 202 checks via CTest
 `test_bytebuf`), so the Task 011 RSS baseline below is unaffected by this
 task — and no buffer-efficiency claim is drawn from it.
 
+## TCP listener (Task 014)
+
+First networking primitive: loopback-IPv4 TCP listen + descriptor
+lifecycle only (`include/omniroute/listener.h`, `src/listener.c`,
+unit-tested by `tests/test_listener.c` — 52 checks via CTest
+`listener-unit`, loopback-only, self-cleaning).
+
+- **Scope**: IPv4 `127.0.0.0/8` bind enforced in code (`0.0.0.0` and
+  non-loopback rejected); IPv6 deferred. Explicit or ephemeral (`0`) port;
+  actual port always read back from kernel socket state. Tests use
+  ephemeral ports only — operator port `20128` is never bound.
+- **Creation**: TCP stream socket with atomic `SOCK_NONBLOCK |
+SOCK_CLOEXEC`, verified after creation (fails closed); `SO_REUSEADDR`
+  only — no `REUSEPORT`, keepalive, `NODELAY`, or buffer tuning.
+  Bounded backlog `OMNI_LISTENER_BACKLOG` (16; kernel may clamp).
+- **Ownership**: success publishes exactly one owned FD; destroy closes it
+  exactly once (single close, never retried — see header). Invalid
+  sentinel is `-1` (FD `0` is valid; proven by a fork-isolated FD-0
+  lifecycle test). Borrowed-FD accessor for future event-loop
+  registration; NULL/inert/repeated destroy are safe no-ops.
+- **Errors**: status enum + errno captured before cleanup; bounded EINTR
+  retries on the one-shot setup calls; ordinary bind conflicts fail
+  without aborting, leaking nothing.
+- **Not this task**: no accept path, no connection objects, no payload
+  input/output, no event loop (epoll/poll/select), no HTTP, no threads,
+  no signal changes.
+- **Boundary gate**: `tests/check_network_boundary.sh` (CTest
+  `network-source-boundary`) confines socket/FD tokens to
+  `src/listener.c` — arena, bytebuf, meminfo, and main stay socket-free —
+  and bans accept/loop/IO/thread/TLS tokens in all production sources.
+
+`main` never binds a listener (separate static lib linked only into
+`test_listener`), so the Task 011 baseline below still describes a
+socket-free executable — and no listener-overhead claim is drawn from it.
+
 ## Initial baseline (Task 011, measured 2026-09-19)
 
 Environment: Linux 7.2.4-zen2 x86_64, 8 CPUs, 16 GiB RAM; GCC 16.2.1,
@@ -193,6 +233,12 @@ Task 013 regression: unchanged — 16,640 bytes, RSS ≈ 1,748 kB, peak
 into `test_bytebuf`). RSS samples 1,748–1,752 kB across runs (one-shot
 print-and-exit variance, same qualification as the Task 011 baseline).
 
+Task 014 regression: unchanged — 16,640 bytes, RSS ≈ 1,748 kB, peak
+≈ 1,748 kB (`nm` confirms no listener, socket, or bind symbols in
+`omniroute-native`; the listener lives in a separate static lib linked
+only into `test_listener`, and `main` binds nothing). RSS samples
+1,748–1,752 kB across runs (same one-shot variance).
+
 ## Platform boundary
 
 Linux x86_64/arm64 is the build target; the `/proc` reader is the only
@@ -203,7 +249,9 @@ from the migration design happens when iOS work starts.
 
 ## Intentionally deferred
 
-Allocator/arenas, event loop (epoll/io_uring/threads), sockets, HTTP,
-`/health`, `/v1/models`, TLS, SQLite, crypto, auth, providers, routing,
-streaming, compression, MCP, A2A, Objective-C/Swift/assembly. Each gets its
-own reviewable task.
+Event loop (epoll/io_uring/threads), accept path and connection objects,
+socket payload input/output, HTTP, `/health`, `/v1/models`, TLS, SQLite,
+crypto, auth, providers, routing, streaming, compression, MCP, A2A,
+Objective-C/Swift/assembly. (Arenas, byte buffers, and listener lifecycle
+are landed primitives now — see above.) Each remaining item gets its own
+reviewable task.
