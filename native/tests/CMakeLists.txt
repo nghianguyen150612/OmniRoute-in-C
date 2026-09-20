@@ -212,3 +212,12 @@ target_link_libraries(test_event_loop PRIVATE omni_event_loop omni_runtime
 omni_apply_native_flags(test_event_loop)
 add_test(NAME event-loop-unit COMMAND test_event_loop)
 set_tests_properties(event-loop-unit PROPERTIES TIMEOUT 240)
+
+# Bounded connection I/O state machine tests (Task 025): state machine,
+# read/write, close/error transitions, ownership survival. Loopback-only,
+# self-cleaning, no external network, and no production event loop.
+add_executable(test_connection_io test_connection_io.c)
+target_link_libraries(test_connection_io PRIVATE omni_connection_io omni_recv omni_send omni_accepted omni_listener omni_poller omni_bytebuf)
+omni_apply_native_flags(test_connection_io)
+add_test(NAME connection-io-unit COMMAND test_connection_io)
+set_tests_properties(connection-io-unit PROPERTIES TIMEOUT 240)

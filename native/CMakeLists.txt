@@ -126,6 +126,13 @@ add_library(omni_runtime STATIC
 add_library(omni_event_loop STATIC
   src/event_loop.c)
 
+# Bounded connection I/O state machine foundation (Task 025). Owns receive
+# and send buffer interaction, I/O state transitions, and read/write readiness
+# handling. It remains test-only; production startup still has no connection
+# dispatcher or I/O wiring.
+add_library(omni_connection_io STATIC
+  src/connection_io.c)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
@@ -143,6 +150,7 @@ target_include_directories(omni_reactor PUBLIC include)
 target_include_directories(omni_connection_reactor PUBLIC include)
 target_include_directories(omni_runtime PUBLIC include)
 target_include_directories(omni_event_loop PUBLIC include)
+target_include_directories(omni_connection_io PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 target_link_libraries(omni_event_loop PUBLIC omni_runtime omni_reactor omni_registry omni_poller
@@ -183,6 +191,7 @@ omni_apply_native_flags(omni_reactor)
 omni_apply_native_flags(omni_connection_reactor)
 omni_apply_native_flags(omni_runtime)
 omni_apply_native_flags(omni_event_loop)
+omni_apply_native_flags(omni_connection_io)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)

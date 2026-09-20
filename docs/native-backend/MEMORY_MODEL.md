@@ -443,6 +443,27 @@ omni_event_loop` is 48 bytes and its configuration view is 16 bytes. It
     storage, stores no queue, and keeps only saturating `uint64_t` iteration
     and processed-event counters. Protocols, timers, signals, threads, and
     production startup wiring remain deferred.
+  - Bounded connection I/O state machine implemented (Task 025,
+    `native/src/connection_io.c`, `omni_connection_io_*`): the I/O layer
+    borrows one live `omni_accepted` owner plus two caller-provided fixed
+    backing ranges, one for the receive `omni_bytebuf` and one for the send
+    `omni_bytebuf`. It owns exactly those two borrowed byte-buffer objects
+    plus I/O state; it never owns the descriptor, never parses, and never
+    implements HTTP/JSON/routing/auth/TLS. Readiness handling delegates once
+    to `omni_recv_once` and `omni_send_once`; the transient `OPEN ->
+READABLE -> OPEN` and `OPEN -> WRITABLE -> OPEN` transitions ensure the
+    state machine is observable yet single-step. Close moves `OPEN ->
+CLOSING` and is idempotent from `CLOSING`/`CLOSED`; destroy releases both
+    byte buffers and reaches `CLOSED` without closing the descriptor or
+    touching registry/reactor state. On the current 64-bit Linux ABI,
+    `struct omni_connection_io` is 112 bytes (one borrowed pointer plus two
+    48-byte byte buffers plus 4-byte state plus padding) and the transient
+    `struct omni_connection_io_config` is 40 bytes. For `R` receive and `S`
+    send bytes, total per-connection I/O memory is `112 + R + S` caller bytes
+    with no per-read/write allocation, no dynamic growth, no queue, and no
+    hidden heap. Receive and send capacities are independent, fixed at `init`,
+    and never changed. Protocols, parsers, timers, threads, and production
+    startup wiring remain deferred.
 - Caches: global byte budget (e.g. single-digit MiB default on iOS, higher
   on Linux via config), per-cache caps, idle eviction; heavy caches
   (catalog, embeddings) releasable.

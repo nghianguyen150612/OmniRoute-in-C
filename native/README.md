@@ -45,7 +45,7 @@ no `-march=native`, no LTO.
 native/
   README.md                  # this file (build matrix, behavior, baseline)
   CMakeLists.txt             # Linux-first build described above
-  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h, reactor.h, connection_reactor.h, runtime.h, event_loop.h
+  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h, reactor.h, connection_reactor.h, runtime.h, event_loop.h, connection_io.h
   src/
     main.c                   # entry point, tiny CLI, lifecycle
     meminfo.c                # Linux /proc/self/status RSS hook (+ stub elsewhere)
@@ -62,6 +62,7 @@ native/
     connection_reactor.c     # connection lifecycle/reactor adapter (Task 022)
     runtime.c                # runtime lifecycle coordinator (Task 023)
     event_loop.c             # bounded synchronous runtime event loop (Task 024)
+    connection_io.c          # bounded connection I/O state machine (Task 025)
   tests/
     CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
     check_network_boundary.sh  # review gate: socket setup confined to src/listener.c,
@@ -923,6 +924,138 @@ CLI, network-boundary gate, Tasks 012-023 regression suites, and
 same 22 cases. `npm run check:docs-all` passed its documentation gates with
 only the repository's pre-existing soft count/version/date drift warnings.
 
+## Bounded connection I/O state machine (Task 025)
+
+Task 025 is the first connection I/O lifecycle layer above the transport
+primitives (`include/omniroute/connection_io.h`, `src/connection_io.c`,
+and `tests/test_connection_io.c`):
+
+```text
+event_loop
+      |
+      v
+connection_reactor
+      |
+      v
+connection_io
+      |
+      +-- receive buffer (omni_bytebuf, borrowed)
+      |
+      +-- send buffer (omni_bytebuf, borrowed)
+      |
+      +-- socket read/write (through omni_recv / omni_send)
+```
+
+```text
+connection
+     |
+     v
+connection_io
+     |
+     +-- omni_bytebuf receive
+     |
+     +-- omni_bytebuf send
+     |
+     +-- socket fd (borrowed from omni_accepted)
+```
+
+The public surface is `omni_connection_io_make_inert`,
+`omni_connection_io_init`, `omni_connection_io_readable`,
+`omni_connection_io_writable`, `omni_connection_io_close`, and
+`omni_connection_io_destroy`, with `omni_connection_io_state`,
+`omni_connection_io_is_open`, `omni_connection_io_receive_buffer`,
+`omni_connection_io_send_buffer`, and `omni_connection_io_fd` views.
+`init` borrows one live `omni_accepted` owner plus two caller-provided
+fixed backing ranges for the receive and send `omni_bytebuf` objects. No
+heap allocation occurs at any connection I/O operation; the caller keeps the
+accepted owner and both backing ranges alive until after `destroy`.
+
+**State machine**: the explicit states are `NEW`, `OPEN`, `READABLE`,
+`WRITABLE`, `CLOSING`, and `CLOSED`. `make_inert` canonicalizes fresh or
+`CLOSED` storage to `NEW`. `init` transitions `NEW -> OPEN` and rejects every
+other source state, invalid storage, zero capacity, or a non-live accepted
+owner without changing state. `readable` and `writable` are valid only from
+`OPEN` and perform the transient `OPEN -> READABLE -> OPEN` and
+`OPEN -> WRITABLE -> OPEN` transitions around exactly one delegated
+`omni_recv_once` or `omni_send_once` call. `close` moves `OPEN -> CLOSING`
+and is idempotent from `CLOSING` and `CLOSED` while being rejected from
+`NEW`. `destroy` releases both borrowed byte-buffer objects and reaches
+`CLOSED`; it is idempotent and safe on `NEW`, `NULL`, and `CLOSED`. Closed
+connections reject every I/O attempt with `ERR_CLOSED`, and `make_inert` is
+not a cleanup for `OPEN`, `READABLE`, `WRITABLE`, or `CLOSING` objects.
+
+**Read path**: `omni_connection_io_readable` delegates once to
+`omni_recv_once` into the bounded receive tail. It handles successful data
+receipt, `EAGAIN`/`EWOULDBLOCK`, `EINTR`, `EOF` (orderly peer shutdown),
+buffer-full (zero writable tail, no kernel wait), and fatal errors, mapping
+each `omni_recv_status` to the corresponding `omni_connection_io_status`
+and preserving `errno` where the primitive does. It never grows the buffer,
+never compacts or resets it, never parses bytes, and never performs more
+than one kernel wait. A buffer that is full reports `ERR_BUFFER_FULL`
+without consuming pending socket bytes.
+
+**Write path**: `omni_connection_io_writable` writes only already-buffered
+bytes from the send `omni_bytebuf`. It obtains the readable view and
+delegates once to `omni_send_once` with that span, then consumes exactly the
+positive `sent` count through `omni_bytebuf_consume` on progress. It handles
+full write (positive progress draining the readable region), partial write
+(leaving the remaining tail for a later readiness event), `EAGAIN`/
+`EWOULDBLOCK`, `EINTR`, and fatal/peer-closed errors, mapping each
+`omni_send_status` to the corresponding connection I/O status and preserving
+`errno`. It performs no automatic retry loop, no blocking wait, and no extra
+probe call when the send buffer is already empty.
+
+**Ownership**: the connection I/O object owns only its receive and send
+`omni_bytebuf` objects (borrowed backing) and the I/O state. It borrows the
+`omni_accepted` owner and its descriptor and never destroys the accepted
+owner, never closes the descriptor, never destroys a registry entry, never
+removes a reactor registration, and never frees caller memory. The connection
+still owns lifecycle identity and registry membership; the socket follows the
+existing accepted/connection ownership rules. The caller must remove any
+external poller registration before `destroy`, as with the earlier
+connection object.
+
+**Memory**: on the current 64-bit Linux ABI, `struct omni_connection_io`
+is 112 bytes (`struct omni_accepted *` plus two `struct omni_bytebuf` at
+48 bytes each plus 4-byte state plus 4 bytes padding) and the transient
+`struct omni_connection_io_config` is 40 bytes. For receive capacity `R`
+and send capacity `S`, the caller reserves exactly `R + S` bytes of backing
+plus the connection I/O object itself. There is no per-read or per-write
+heap allocation, no dynamic buffer growth, no queue, and no hidden
+allocation. Receive and send capacities are independent, fixed at `init`,
+and never changed.
+
+**Error model**: every I/O operation returns an explicit
+`omni_connection_io_result` with a status, a preserved `sys_errno`, and a
+`count`. The statuses cover `OK`, `ERR_INVALID` (NULL, bad storage, bad fd,
+zero capacity), `ERR_STATE` (invalid lifecycle transition), `ERR_CLOSED`
+(I/O after close), `ERR_BUFFER_FULL`, `ERR_WOULD_BLOCK`, `ERR_INTERRUPTED`,
+`ERR_EOF`, and `ERR_IO` (fatal socket error with `errno` preserved). Would-
+block and interrupted outcomes are normal control flow, not hidden.
+
+**Protocol boundary**: HTTP, JSON, OpenAI API, routing, authentication,
+TLS, compression, WebSocket, SSE, providers, and database remain deferred.
+The connection I/O layer owns data movement only and never interprets
+protocol bytes. `omniroute-native` still links only its Task 011 CLI
+sources; `omni_connection_io` is linked only into `test_connection_io`.
+
+Task 025 validation covers valid and invalid initialization, inert behavior,
+readable socket receives with EOF, write with full and partial drain and
+buffer-draining verification on the client side, close and repeated-close
+transitions, I/O-after-close rejection, descriptor and registry
+non-destruction, fixed-capacity memory checks, and 10 repeated
+read/write/close/destroy stress cycles. The focused connection I/O suite
+reports 157 checks with zero failures in the current validation run.
+
+Final Task 025 validation detail: GCC Debug, GCC Release, Clang Debug, Clang
+Release, GCC ASan+UBSan Debug, and Clang ASan+UBSan Debug all built
+warning-clean. Each configuration passed all 23 CTest cases, covering the
+CLI, network-boundary gate, Tasks 012-024 regression suites, and
+`connection-io-unit`; the canonical `npm run test:native` Debug run passed
+the same 23 cases. `npm run check:docs-all` passed its documentation gates
+with only the repository's pre-existing soft count/version/date drift
+warnings.
+
 ## Initial baseline (Task 011, measured 2026-09-19)
 
 Environment: Linux 7.2.4-zen2 x86_64, 8 CPUs, 16 GiB RAM; GCC 16.2.1,
@@ -1013,14 +1146,15 @@ from the migration design happens when iOS work starts.
 ## Intentionally deferred
 
 Alternate event-loop backends (epoll/io_uring), production connection dispatcher,
-output queues and connection write state, HTTP, `/health`, `/v1/models`, TLS, SQLite, crypto,
+HTTP, `/health`, `/v1/models`, TLS, SQLite, crypto,
 auth, providers, routing, streaming, compression, MCP, A2A,
 Objective-C/Swift/assembly.
 (Arenas, byte buffers, listener lifecycle, readiness observation,
 accepted-socket ownership with its bounded accept drain, receive with its
 bounded drain, the immutable-span send primitive with its bounded drain,
-the protocol-agnostic connection owner, the bounded connection registry, and
-the connection/reactor lifecycle adapter are landed primitives now — see
-above.) Each
+the protocol-agnostic connection owner, the bounded connection registry, the
+connection/reactor lifecycle adapter, the runtime coordinator, the bounded
+synchronous event loop, and the bounded connection I/O state machine are
+landed primitives now — see above.) Each
 remaining item gets its own reviewable task.
 // linguist refresh
