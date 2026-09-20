@@ -160,3 +160,13 @@ target_link_libraries(test_registry PRIVATE omni_registry omni_connection omni_r
 omni_apply_native_flags(test_registry)
 add_test(NAME registry-unit COMMAND test_registry)
 set_tests_properties(registry-unit PROPERTIES TIMEOUT 120)
+
+# Bounded reactor/event-loop foundation tests (Task 021): poller-reactor integration,
+# callback dispatch, token identity round-trip, capacity boundaries, duplicate
+# handling, and bounded step execution. Loopback-only, self-cleaning, no
+# external network, no payload transfer, no production protocol handling.
+add_executable(test_reactor test_reactor.c)
+target_link_libraries(test_reactor PRIVATE omni_reactor omni_poller omni_listener)
+omni_apply_native_flags(test_reactor)
+add_test(NAME reactor-unit COMMAND test_reactor)
+set_tests_properties(reactor-unit PROPERTIES TIMEOUT 120)

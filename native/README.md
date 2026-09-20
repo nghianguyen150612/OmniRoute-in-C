@@ -574,6 +574,85 @@ samples of 1,748/1,748, 1,748/1,748, and 1,748/1,748 kB; registry, connection,
 and native socket-layer symbols remained absent because the registry library
 is test-only linked.
 
+## Bounded reactor foundation (Task 021)
+
+The first bounded reactor/event-loop foundation connects the poller to
+application callbacks (`include/omniroute/reactor.h`, `src/reactor.c`,
+unit-tested by `tests/test_reactor.c` — focused lifecycle, registration,
+event processing, and stress tests). The reactor sits between the poller
+and user callbacks:
+
+```
+poller -> reactor -> user callbacks
+```
+
+It is a thin event dispatcher that never processes payloads, never
+creates sockets, never owns descriptors, never closes connections,
+never destroys connection objects, never allocates memory per event,
+never owns external resources. Its sole responsibility is:
+
+- waiting for events
+- dispatching ready notifications
+- coordinating existing primitives
+
+This layer provides the first bounded reactor/event-loop foundation
+for future server runtime components. Subsequent tasks will use this
+reactor to build HTTP, JSON, routing, authentication, provider handling,
+TLS, threads, worker pools, timers, background tasks, etc.
+
+**Event flow**: `poller_wait()` -> `reactor_step()` ->
+`callback(token, events, context)` — the reactor only reports readiness,
+never calls `recv()`/`send()`, closes sockets, destroys connections,
+or processes protocols.
+
+**Step behavior**: `reactor_step(timeout_ms)` processes at most one
+bounded step:
+
+- returns after processing current events
+- supports `timeout=0` (probe) and positive timeout
+- returns when no more events are ready within timeout
+- never loops infinitely
+
+**Supports interrupted wait**: when poller_wait returns
+`INTERRUPTED`, the reactor returns `ERR_INTERRUPTED` with zero events
+processed and state unchanged (the poller is still registered).
+
+**Memory requirements**: explicit fixed-capacity storage allocated at
+initialization only. No per-event allocation, no dynamic growth,
+no unbounded queues. All ownership is explicit and contract-driven.
+
+**Callback contract**: token (opaque uint64 identity), events
+(readiness mask), context (user-provided pointer) — user must keep
+the callback and context valid as long as registration exists.
+
+**Registration contract**: token uniqueness, capacity enforcement,
+descriptor ownership never transfers (reactor borrows only).
+
+**Integration limited**: stores registry reference, dispatches registry
+tokens — no destroying connections, changing lifecycle, or automatic
+cleanup.
+
+`main` still links only `src/main.c` and `src/meminfo.c`; `omni_reactor` is
+linked only into `test_reactor`, so normal `omniroute-native` startup
+remains the Task 011 short-lived executable.
+
+Task 021 validation record (2026-09-20): the focused `reactor-unit` test
+passed all checks with zero failures, and the updated network-boundary gate
+passed. The complete compiler/sanitizer matrix and regression sweep are
+recorded after the final validation run below.
+
+Final Task 021 validation detail: GCC Debug, GCC Release, Clang Debug, Clang
+Release, GCC ASan+UBSan Debug, and Clang ASan+UBSan Debug each built
+warning-clean and passed all 17 CTest cases. The focused reactor suite was
+also repeated five times at checks with zero failures. `npm run
+check:docs-all` passed documentation sync, frontmatter, environment sync,
+internal links, and fabricated-doc checks; it retained only the repository's
+pre-existing soft count/version/date drift warnings. The GCC Release
+`omniroute-native` remained 16,640 bytes (`size` dec 4,767), with RSS/HWM
+samples of 1,748/1,748, 1,748/1,748, and 1,748/1,748 kB; reactor symbols
+and native socket-layer symbols remained absent because the reactor library
+is test-only linked.
+
 ## Initial baseline (Task 011, measured 2026-09-19)
 
 Environment: Linux 7.2.4-zen2 x86_64, 8 CPUs, 16 GiB RAM; GCC 16.2.1,
