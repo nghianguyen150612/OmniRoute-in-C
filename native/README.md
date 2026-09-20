@@ -45,7 +45,7 @@ no `-march=native`, no LTO.
 native/
   README.md                  # this file (build matrix, behavior, baseline)
   CMakeLists.txt             # Linux-first build described above
-  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h
+  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h, reactor.h
   src/
     main.c                   # entry point, tiny CLI, lifecycle
     meminfo.c                # Linux /proc/self/status RSS hook (+ stub elsewhere)
@@ -58,6 +58,7 @@ native/
     send.c                   # bounded nonblocking send from immutable span (Task 018)
     connection.c             # protocol-agnostic connection owner (Task 019)
     registry.c               # bounded connection registry (Task 020)
+    reactor.c                # bounded poller-to-callback reactor (Task 021)
   tests/
     CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
     check_network_boundary.sh  # review gate: socket setup confined to src/listener.c,
@@ -576,82 +577,81 @@ is test-only linked.
 
 ## Bounded reactor foundation (Task 021)
 
-The first bounded reactor/event-loop foundation connects the poller to
-application callbacks (`include/omniroute/reactor.h`, `src/reactor.c`,
-unit-tested by `tests/test_reactor.c` — focused lifecycle, registration,
-event processing, and stress tests). The reactor sits between the poller
-and user callbacks:
+The first bounded reactor/event-loop foundation connects the existing poller
+to explicit application callbacks (`include/omniroute/reactor.h`,
+`src/reactor.c`, and `tests/test_reactor.c`):
 
 ```
-poller -> reactor -> user callbacks
+poller_wait() -> reactor_step() -> callback(token, events, context)
 ```
 
-It is a thin event dispatcher that never processes payloads, never
-creates sockets, never owns descriptors, never closes connections,
-never destroys connection objects, never allocates memory per event,
-never owns external resources. Its sole responsibility is:
+The public surface is `omni_reactor_init`, `omni_reactor_destroy`,
+`omni_reactor_add`, `omni_reactor_remove`, and `omni_reactor_step`, with
+`omni_reactor_make_inert` plus count/capacity views for the same explicit
+lifecycle convention as the earlier native primitives. Initialization takes
+a live poller and caller-provided fixed arrays of
+`struct omni_reactor_registration` and `struct omni_poller_event`. The
+reactor never allocates, grows, queues, or allocates per event.
 
-- waiting for events
-- dispatching ready notifications
-- coordinating existing primitives
+**Responsibility and ownership**: the reactor waits and dispatches readiness
+only. It never reads or writes payload bytes, accepts, closes, destroys a
+connection, changes connection lifecycle, or processes HTTP/JSON/routing/
+authentication/provider/TLS protocols. Descriptors, connection objects,
+registry entries, poller backing, registration arrays, event arrays, callback
+functions, and callback contexts remain externally owned. The reactor does
+own the logical registration set: removal and destruction unregister borrowed
+descriptors from the poller and clear callback/context fields, but never close
+those descriptors or touch a connection/registry entry. The poller itself is
+borrowed and is destroyed separately by its caller.
 
-This layer provides the first bounded reactor/event-loop foundation
-for future server runtime components. Subsequent tasks will use this
-reactor to build HTTP, JSON, routing, authentication, provider handling,
-TLS, threads, worker pools, timers, background tasks, etc.
+**Callback lifetime**: `omni_reactor_callback` receives the registered opaque
+`uint64_t` token, the poller readiness mask (`READ`, `WRITE`, `ERROR`,
+`HANGUP`, or `INVALID`), and the exact caller context pointer. The caller must
+keep the callback and context valid while the registration exists. Once
+remove/destroy returns, the reactor has cleared those fields and no longer
+retains either pointer. Callback execution is synchronous and single-owner;
+the reactor does not retain a callback result or enqueue follow-up work.
 
-**Event flow**: `poller_wait()` -> `reactor_step()` ->
-`callback(token, events, context)` — the reactor only reports readiness,
-never calls `recv()`/`send()`, closes sockets, destroys connections,
-or processes protocols.
+**Bounded execution**: one `omni_reactor_step(timeout_ms)` validates the
+timeout, performs at most one `omni_poller_wait`, and dispatches the complete
+ready set represented by the fixed event array before returning. `timeout=0`
+probes, a positive timeout bounds one wait, an empty reactor returns without
+waiting, and negative or over-`INT_MAX` values are rejected. An interrupted
+wait returns `OMNI_REACTOR_ERR_INTERRUPTED` with zero callbacks and unchanged
+poller registrations. The step never starts an implicit loop; a caller that
+wants another step calls it explicitly. If a callback removes a later source,
+that source's event is skipped; if it destroys the reactor, dispatch stops.
 
-**Step behavior**: `reactor_step(timeout_ms)` processes at most one
-bounded step:
+**Memory usage**: reactor steady state has no heap allocation. For capacity
+`N`, the caller reserves
+`sizeof(struct omni_reactor) + N * (sizeof(struct
+omni_reactor_registration) + sizeof(struct omni_poller_event))` bytes, in
+addition to the poller's own fixed backing. The registration array is dense,
+and the poller event array is reused for each step. There are no per-event
+allocations, unbounded queues, hidden allocators, or dynamic growth paths.
 
-- returns after processing current events
-- supports `timeout=0` (probe) and positive timeout
-- returns when no more events are ready within timeout
-- never loops infinitely
+**Integration boundary**: tokens can carry registry identities, but this
+foundation stores no registry pointer and performs no registry or connection
+lifecycle operation. `main` still links only `src/main.c` and `src/meminfo.c`;
+`omni_reactor` is linked only into `test_reactor`, so normal
+`omniroute-native` startup remains the Task 011 short-lived executable.
 
-**Supports interrupted wait**: when poller_wait returns
-`INTERRUPTED`, the reactor returns `ERR_INTERRUPTED` with zero events
-processed and state unchanged (the poller is still registered).
-
-**Memory requirements**: explicit fixed-capacity storage allocated at
-initialization only. No per-event allocation, no dynamic growth,
-no unbounded queues. All ownership is explicit and contract-driven.
-
-**Callback contract**: token (opaque uint64 identity), events
-(readiness mask), context (user-provided pointer) — user must keep
-the callback and context valid as long as registration exists.
-
-**Registration contract**: token uniqueness, capacity enforcement,
-descriptor ownership never transfers (reactor borrows only).
-
-**Integration limited**: stores registry reference, dispatches registry
-tokens — no destroying connections, changing lifecycle, or automatic
-cleanup.
-
-`main` still links only `src/main.c` and `src/meminfo.c`; `omni_reactor` is
-linked only into `test_reactor`, so normal `omniroute-native` startup
-remains the Task 011 short-lived executable.
-
-Task 021 validation record (2026-09-20): the focused `reactor-unit` test
-passed all checks with zero failures, and the updated network-boundary gate
-passed. The complete compiler/sanitizer matrix and regression sweep are
-recorded after the final validation run below.
+Task 021 validation record (2026-09-20): `reactor-unit` covers lifecycle,
+invalid inputs, add/remove and duplicate/full handling, empty/zero/positive
+timeouts, read/write/error dispatch, context propagation, interrupted waits,
+repeated add/remove, repeated steps, and destroy-without-close. The focused
+suite reports 83 checks with zero failures. The complete compiler,
+sanitizer, regression, and documentation results are recorded after the
+final validation run below.
 
 Final Task 021 validation detail: GCC Debug, GCC Release, Clang Debug, Clang
-Release, GCC ASan+UBSan Debug, and Clang ASan+UBSan Debug each built
-warning-clean and passed all 17 CTest cases. The focused reactor suite was
-also repeated five times at checks with zero failures. `npm run
-check:docs-all` passed documentation sync, frontmatter, environment sync,
-internal links, and fabricated-doc checks; it retained only the repository's
-pre-existing soft count/version/date drift warnings. The GCC Release
-`omniroute-native` remained 16,640 bytes (`size` dec 4,767), with RSS/HWM
-samples of 1,748/1,748, 1,748/1,748, and 1,748/1,748 kB; reactor symbols
-and native socket-layer symbols remained absent because the reactor library
-is test-only linked.
+Release, GCC ASan+UBSan Debug, and Clang ASan+UBSan Debug all built
+warning-clean. Each configuration passed all 19 CTest cases: the CLI,
+network-boundary, and Tasks 012-020 regression suites plus `reactor-unit`.
+The focused reactor executable was repeated five times at 83 checks with zero
+failures. `npm run check:docs-all` passed all documentation gates, retaining
+only the repository's pre-existing non-blocking count/version/date drift
+warnings.
 
 ## Initial baseline (Task 011, measured 2026-09-19)
 

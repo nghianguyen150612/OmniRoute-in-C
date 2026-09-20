@@ -1,53 +1,27 @@
 /*
  * OmniRoute native backend — bounded reactor foundation (Task 021).
  *
- * The reactor connects the poller to application callbacks:
+ * The reactor is the small coordination layer between the existing poller
+ * and application callbacks:
  *
- *   poller -> reactor -> user callbacks
- *
- * It is a thin event dispatcher that never processes payloads, never
- * creates sockets, never owns descriptors, never closes connections,
- * never destroys connection objects, never allocates memory per event,
- * never owns external resources. Its sole responsibility is:
- *
- *   - waiting for events
- *   - dispatching ready notifications
- *   - coordinating existing primitives
- *
- * This layer provides the first bounded reactor/event-loop foundation
- * for future server runtime components. Subsequent tasks will use this
- * reactor to build HTTP, JSON, routing, authentication, provider handling,
- * TLS, threads, worker pools, timers, background tasks, etc.
- *
- * Memory is explicit and bounded: fixed-capacity storage allocated at
- * initialization only. No per-event allocation, no dynamic growth,
- * no unbounded queues. All ownership is explicit and contract-driven.
- *
- * Callback contract:
- *   - Token: opaque uint64 identity (round-trip from registration)
- *   - Events: readiness mask (OMNI_REACTOR_READY_*)
- *   - Context: user-provided pointer (lifetime managed by caller)
- *   - Lifetime: user must keep callback and context valid as long as
- *     registration exists; reactor never dereferences invalid pointers
- *
- * Registration contract:
- *   - Token must be unique (duplicate registration rejected)
- *   - Capacity must not be exceeded (calls fail with unchanged state)
- *   - Descriptor ownership never transferred (reactor borrows only)
- *
- * Event flow:
  *   poller_wait() -> reactor_step() -> callback(token, events, context)
- *   The reactor only reports readiness, never calls recv/send, closes
- *   sockets, destroys connections, or processes protocols.
  *
- * Step behavior:
- *   reactor_step(timeout_ms) processes at most one bounded step:
- *     - returns after processing current events
- *     - supports timeout=0 (probe) and positive timeout
- *     - returns when no more events are ready within timeout
- *     - never loops infinitely
+ * It waits for readiness and reports it. It does not perform payload reads or
+ * writes, accept descriptors, close descriptors, or process protocol/parser
+ * code. It does not own sockets,
+ * connection objects, registry entries, or external buffers.
  *
- * This is not a complete server runtime.
+ * Storage is explicit and fixed-capacity. The caller supplies one registration
+ * array and one poller-event array at initialization; the reactor never
+ * allocates, grows, queues, or allocates per event. The caller keeps those
+ * arrays, the poller, every callback, and every callback context valid until
+ * the corresponding reactor operation has removed or destroyed the
+ * registration. Removal and destruction clear callback/context fields before
+ * releasing the registration, so the reactor does not retain those pointers.
+ *
+ * A reactor is single-owner and externally synchronized. Callback code may
+ * inspect or coordinate application state, and may remove registrations, but
+ * the reactor does not infer ownership or perform application cleanup.
  */
 
 #ifndef OMNIROUTE_REACTOR_H
@@ -61,118 +35,105 @@
 
 typedef void (*omni_reactor_callback)(uint64_t token, uint32_t events, void *context);
 
+struct omni_reactor_registration {
+  int fd;
+  uint64_t token;
+  uint32_t interests;
+  omni_reactor_callback callback;
+  void *context;
+};
+
 enum omni_reactor_status {
   OMNI_REACTOR_OK = 0,
-  OMNI_REACTOR_ERR_INVALID,    /* NULL args, poller not live, full capacity, duplicate token */
-  OMNI_REACTOR_ERR_NOT_FOUND,  /* remove on unknown token */
-  OMNI_REACTOR_ERR_INTERRUPTED /* poller wait interrupted; state unchanged */
+  OMNI_REACTOR_ERR_INVALID,     /* NULL, inert, bad descriptor/mask/timeout */
+  OMNI_REACTOR_ERR_DUPLICATE,   /* token or descriptor already registered */
+  OMNI_REACTOR_ERR_FULL,        /* fixed registration capacity exhausted */
+  OMNI_REACTOR_ERR_NOT_FOUND,   /* remove target is absent */
+  OMNI_REACTOR_ERR_OUTPUT,      /* poller output cannot represent its live set */
+  OMNI_REACTOR_ERR_WAIT,        /* readiness wait failed */
+  OMNI_REACTOR_ERR_INTERRUPTED  /* readiness wait was interrupted */
 };
 
 struct omni_reactor_result {
   enum omni_reactor_status status;
   int sys_errno; /* errno at the failure point; 0 on success */
-  size_t count;  /* events processed on OK */
+  size_t count;  /* callbacks dispatched on OK; 0 for failures */
 };
 
 struct omni_reactor {
-  struct omni_poller *poller;          /* borrowed reactor poller */
-  omni_reactor_callback *callbacks;    /* [capacity] callback table */
-  void **contexts;                     /* [capacity] user context table */
-  uint32_t *ready_masks;               /* [capacity] preallocated ready masks */
-  uint64_t *tokens;                    /* [capacity] identity tokens */
-  int *fds;                           /* [capacity] descriptor table */
-  bool *registered;                   /* [capacity] registration state */
+  struct omni_poller *poller; /* borrowed; caller destroys it separately */
+  struct omni_reactor_registration *registrations; /* [capacity], caller-owned */
+  struct omni_poller_event *events;                /* [capacity], caller-owned */
   size_t capacity;
-  size_t count; /* live registrations */
+  size_t count;
   bool live;
 };
 
 /*
- * Canonicalize fresh caller-owned reactor storage to inert without touching
- * any owned poller reference. NULL-safe. Call before first init when the
- * struct is not statically zeroed.
+ * Set a fresh caller-owned object to inert. NULL-safe. This is not cleanup for
+ * a live reactor: destroy a live reactor first so its poller registrations are
+ * removed and callback pointers are cleared.
  */
 void omni_reactor_make_inert(struct omni_reactor *reactor);
 
 /*
- * Borrow a live poller and fixed-capacity parallel storage. The caller keeps
- * all arrays alive until after destroy. The poller must be live and externally
- * owned. Capacity must be nonzero and fit in 32 bits so every position stays
- * representable in a handle. Returns ERR_INVALID for NULL, non-live poller,
- * zero capacity, or overrun capacity. Registration capacity must be a
- * positive power of two for future optimization.
+ * Initialize a live reactor over a live, externally owned poller. The poller
+ * is borrowed and must remain live until reactor_destroy. Registration and
+ * event arrays are borrowed fixed-capacity storage and must remain alive until
+ * reactor_destroy. No allocation occurs. The reactor manages poller entries
+ * added through omni_reactor_add; callers must not mutate that poller set
+ * behind the reactor.
  */
-struct omni_reactor_result omni_reactor_init(struct omni_reactor *reactor,
-                                             struct omni_poller *poller,
-                                             void *callbacks,
-                                             void *contexts,
-                                             void *ready_masks,
-                                             void *tokens,
-                                             void *fds,
-                                             bool *registered,
-                                             size_t capacity);
+struct omni_reactor_result omni_reactor_init(
+    struct omni_reactor *reactor,
+    struct omni_poller *poller,
+    struct omni_reactor_registration *registrations,
+    struct omni_poller_event *events,
+    size_t capacity);
 
 /*
- * Release the borrowed poller reference and all parallel storage. The poller
- * remains owned by its caller and must be destroyed separately. NULL, inert,
- * and repeated destroy are safe no-ops.
+ * Remove all reactor registrations and leave the reactor inert. Descriptors,
+ * poller backing, registration arrays, callbacks, and contexts remain owned
+ * by their callers. NULL, inert, and repeated destruction are safe no-ops.
  */
 void omni_reactor_destroy(struct omni_reactor *reactor);
 
 /*
- * Register an event source for the given token and descriptor. The callback
- * and context are stored in the parallel arrays for the reactor's lifetime.
- * Descriptor ownership never transfers: the poller only observes a borrowed
- * descriptor, and its owner keeps lifetime responsibility. Duplicate tokens
- * and full capacity are rejected with ERR_INVALID and state unchanged.
+ * Register one borrowed descriptor. Token identity is unique within a live
+ * reactor; callback must be non-NULL. Duplicate token/descriptor and full
+ * capacity errors leave both reactor and poller state unchanged.
  */
-struct omni_reactor_result omni_reactor_add(struct omni_reactor *reactor,
-                                           int fd,
-                                           uint64_t token,
-                                           uint32_t interests,
-                                           omni_reactor_callback callback,
-                                           void *context);
+struct omni_reactor_result omni_reactor_add(
+    struct omni_reactor *reactor,
+    int fd,
+    uint64_t token,
+    uint32_t interests,
+    omni_reactor_callback callback,
+    void *context);
 
 /*
- * Remove a registration. Unknown tokens are rejected with ERR_NOT_FOUND and
- * state unchanged. The registration is cleared but the callback and context
- * remain stored in the parallel arrays (caller may reuse token later).
+ * Remove a registration by token. Missing tokens return NOT_FOUND with state
+ * unchanged. Successful removal unregisters the borrowed descriptor and
+ * clears the callback/context before compacting the fixed array. No descriptor
+ * is closed and no connection or registry object is destroyed.
  */
 struct omni_reactor_result omni_reactor_remove(struct omni_reactor *reactor,
-                                              uint64_t token);
+                                               uint64_t token);
 
 /*
- * Replace one registration's interest mask. Unknown tokens are ERR_NOT_FOUND,
- * invalid masks are ERR_INVALID, and state is preserved. Never allocates.
- */
-struct omni_reactor_result omni_reactor_update(struct omni_reactor *reactor,
-                                              uint64_t token,
-                                              uint32_t interests);
-
-/*
- * Process events for a bounded step.
+ * Process one bounded wait/dispatch step. timeout_ms=0 probes; a positive
+ * timeout bounds the single poller wait. Negative and >INT_MAX timeouts are
+ * invalid. The step dispatches each event returned by the poller at most once,
+ * then returns; it never runs an event loop. A callback receives the poller's
+ * readiness mask, including READ, WRITE, ERROR, HANGUP, or INVALID bits.
  *
- * Process events for a bounded step. Waits up to timeout_ms (0 probes, positive
- * bounds the wait; negative and values above INT_MAX are ERR_INVALID). After
- * poller_wait returns, this function processes all ready events from the
- * poller's last result, calling callbacks in the order they appeared.
- * Returns immediately after processing all current events; no infinite loop.
- *
- * Supports interrupted wait: when poller_wait returns INTERRUPTED, the
- * reactor returns ERR_INTERRUPTED with zero events processed and state
- * unchanged (the poller is still registered).
- *
- * Empty reactor: when the reactor has no registrations, returns OK with zero
- * count and no wait.
+ * If a callback removes a later registration, that later event is skipped.
+ * If a callback destroys the reactor, dispatch stops after that callback.
+ * Interrupted waits return ERR_INTERRUPTED with the poller registration set
+ * unchanged and no callback dispatched.
  */
 struct omni_reactor_result omni_reactor_step(struct omni_reactor *reactor,
-                                            int64_t timeout_ms);
-
-/*
- * Drop all registrations while retaining backing capacity. The poller remains
- * live and owned by its caller. Callbacks and contexts are not cleared.
- */
-void omni_reactor_reset(struct omni_reactor *reactor);
+                                             int64_t timeout_ms);
 
 /* Cheap local accounting. NULL or non-live reactors report zero. */
 size_t omni_reactor_capacity(const struct omni_reactor *reactor);

@@ -363,9 +363,26 @@ recovery RSS: …  VmHWM: …  Threads: …  FDs: …
     64-bit). Handles are slot-plus-generation pairs that retire at remove and
     at destroy; remove and destroy never touch connections, never close
     descriptors, and never allocate. Iteration visits live entries in
-    increasing slot order with a caller cursor and no extra storage. There is
-    still no event loop, polling, accept loop, HTTP, routing, timers, or
-    threads.
+    increasing slot order with a caller cursor and no extra storage. At the
+    Task 020 boundary there was still no event loop, polling, accept loop,
+    HTTP, routing, timers, or threads.
+  - Bounded reactor foundation implemented (Task 021,
+    `native/src/reactor.c`, `omni_reactor_*`): the reactor borrows one live
+    poller plus caller-provided fixed registration and event arrays. The
+    registration records contain a borrowed descriptor, token, interest mask,
+    callback, and context; the event array reuses the poller's project-level
+    readiness records for one step. On a 64-bit ABI, the current object sizes
+    are 48 bytes for the reactor, 40 bytes per registration, and 24 bytes per
+    event record, before the poller's own backing. Thus capacity `N` costs
+    `48 + N * 64` bytes for reactor-owned logical state in this ABI, with no
+    heap allocation by the reactor and no per-event allocation. `init` only
+    borrows storage; `add` and `remove` remain fixed-capacity operations.
+    `step` performs one bounded poller wait, dispatches current readiness masks
+    synchronously, and returns; it never reads or writes payloads, closes
+    descriptors, destroys connections, mutates registry entries, or runs a
+    background loop. Descriptors remain caller-owned. Remove and destroy
+    unregister through the poller and clear callback/context pointers, so
+    callback lifetime ends at the operation that removes the registration.
 - Caches: global byte budget (e.g. single-digit MiB default on iOS, higher
   on Linux via config), per-cache caps, idle eviction; heavy caches
   (catalog, embeddings) releasable.

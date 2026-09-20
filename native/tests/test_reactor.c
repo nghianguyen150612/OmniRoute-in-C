@@ -1,22 +1,17 @@
 /*
  * OmniRoute native backend — bounded reactor tests (Task 021).
  *
- * Pure event-dispatch coverage only: no sockets, no payload transfer,
- * no threads, no production protocol handling. Tests poller-reactor
- * integration and reactor lifecycle under deterministic conditions
- * (pipes and socketpairs). Tests validate callback dispatch, token
- * identity round-trip, capacity boundaries, duplicate handling, and
- * bounded step execution. No external network, self-cleaning.
+ * The suite uses local pipes only. Pipe writes/readbacks are test stimulus
+ * and assertions that the reactor reports readiness without processing
+ * payloads; the production reactor itself contains no I/O calls. Each test
+ * uses caller-owned fixed arrays and closes every descriptor it creates.
  */
 
-#define _GNU_SOURCE /* sockets/signals visibility under strict C11 */
+#define _GNU_SOURCE /* setitimer/sigaction visibility under strict C11 */
 
-#include <arpa/inet.h>
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <netinet/in.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -24,593 +19,509 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
-#include "omniroute/reactor.h"
 #include "omniroute/poller.h"
-#include "omniroute/listener.h"
+#include "omniroute/reactor.h"
 
-/* Socket-payload counters: this file performs no socket payload I/O by
- * construction, and the network-boundary gate proves production code
- * cannot either. Asserted zero at the end. */
-static size_t socket_bytes_sent = 0;
-static size_t socket_bytes_read = 0;
+static size_t check_count = 0u;
+static size_t failure_count = 0u;
 
-static int check_count = 0;
-static int failure_count = 0;
+struct callback_state {
+  size_t calls;
+  uint64_t token;
+  uint32_t events;
+  void *context;
+};
 
-static void check(bool condition, const char *name) {
-  ++check_count;
+static void check(bool condition, const char *message) {
+  check_count += 1u;
   if (condition) {
-    printf("ok - %s\n", name);
-  } else {
-    ++failure_count;
-    printf("NOT OK - %s\n", name);
+    return;
   }
+  failure_count += 1u;
+  fprintf(stderr, "FAIL: %s\n", message);
 }
-
-/* Linux-only descriptor census for leak checks; elsewhere those skip. */
-static int count_open_fds(bool *supported) {
-#ifdef __linux__
-  DIR *d = NULL;
-  struct dirent *e = NULL;
-  int n = 0;
-
-  d = opendir("/proc/self/fd");
-  if (d == NULL) {
-    *supported = false;
-    return -1;
-  }
-  while ((e = readdir(d)) != NULL) {
-    if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) {
-      continue;
-    }
-    ++n;
-  }
-  closedir(d);
-  *supported = true;
-  return n - 1;
-#else
-  *supported = false;
-  return -1;
-#endif
-}
-
-static bool fd_open(int fd) {
-  return fcntl(fd, F_GETFD) != -1;
-}
-
-/* Test state tracking */
-static uint64_t last_token_seen = 0u;
-static uint32_t last_events_seen = 0u;
-static void *last_context_seen = NULL;
 
 static void capture_callback(uint64_t token, uint32_t events, void *context) {
-  last_token_seen = token;
-  last_events_seen = events;
-  last_context_seen = context;
+  struct callback_state *state = (struct callback_state *)context;
+
+  if (state == NULL) {
+    return;
+  }
+  state->calls += 1u;
+  state->token = token;
+  state->events = events;
+  state->context = context;
 }
 
-static void reset_capture(void) {
-  last_token_seen = 0u;
-  last_events_seen = 0u;
-  last_context_seen = NULL;
+static bool make_pipe(int fds[2]) {
+  fds[0] = -1;
+  fds[1] = -1;
+  return pipe(fds) == 0;
 }
 
-/* Poller helper: create a socketpair for reactor tests */
-static void make_socketpair(int fds[2]) {
-  socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
+static bool fd_is_open(int fd) {
+  int result = fcntl(fd, F_GETFD);
+
+  return result != -1 || errno != EBADF;
 }
 
-/* ------------------------------------------------------------------- init */
+static void on_alarm(int signal_number) {
+  (void)signal_number;
+}
 
-static void test_reactor_init(void) {
-  struct omni_poller poller;
-  struct omni_reactor reactor;
+static bool init_poller(struct omni_poller *poller,
+                        struct pollfd *poll_slots,
+                        uint64_t *poll_tokens,
+                        size_t capacity) {
+  struct omni_poller_result result =
+      omni_poller_init_borrowed(poller, poll_slots, poll_tokens, capacity);
+
+  return result.status == OMNI_POLLER_OK;
+}
+
+static void test_lifecycle(void) {
+  struct omni_poller poller = { 0 };
+  struct omni_reactor reactor = { 0 };
+  struct pollfd poll_slots[2];
+  uint64_t poll_tokens[2];
+  struct omni_reactor_registration registrations[2];
+  struct omni_poller_event events[2];
+  struct omni_reactor_result result;
+
   omni_reactor_make_inert(&reactor);
+  check(init_poller(&poller, poll_slots, poll_tokens, 2u),
+        "lifecycle poller init succeeds");
 
-  struct pollfd slots_poller[1];
-  uint64_t tokens_poller[1];
-  struct omni_poller_result p_result = omni_poller_init_borrowed(
-      &poller, slots_poller, tokens_poller, 1u);
-  check(p_result.status == OMNI_POLLER_OK, "poller borrowed init succeeds");
-
-  int callbacks[1];
-  int contexts[1];
-  uint32_t ready_masks[1];
-  uint64_t tokens_reactor[1];
-  int fds_reactor[1];
-  bool registered[1];
-
-  struct omni_reactor_result r = omni_reactor_init(
-      &reactor, &poller, callbacks, contexts, ready_masks, tokens_reactor,
-      fds_reactor, registered, 1u);
-
-  check(r.status == OMNI_REACTOR_OK && r.sys_errno == 0 && r.count == 0u,
-        "reactor init succeeds with borrowed poller");
-  check(omni_reactor_capacity(&reactor) == 1u, "reactor capacity matches");
+  result = omni_reactor_init(&reactor, &poller, registrations, events, 2u);
+  check(result.status == OMNI_REACTOR_OK && result.sys_errno == 0 && result.count == 0u,
+        "reactor init succeeds");
+  check(omni_reactor_capacity(&reactor) == 2u, "reactor capacity is fixed");
   check(omni_reactor_count(&reactor) == 0u, "reactor starts empty");
 
   omni_reactor_destroy(&reactor);
-  omni_poller_destroy(&poller);
-}
-
-static void test_reactor_init_rejects(void) {
-  struct omni_poller poller;
-  struct omni_reactor reactor;
-  omni_reactor_make_inert(&reactor);
-
-  struct pollfd slots_poller[1];
-  uint64_t tokens_poller[1];
-  omni_poller_init_borrowed(&poller, slots_poller, tokens_poller, 1u);
-
-  int callbacks[1];
-  int contexts[1];
-  uint32_t ready_masks[1];
-  uint64_t tokens_reactor[1];
-  int fds_reactor[1];
-  bool registered[1];
-
-  /* NULL poller */
-  struct omni_reactor_result r = omni_reactor_init(
-      &reactor, NULL, callbacks, contexts, ready_masks, tokens_reactor,
-      fds_reactor, registered, 1u);
-  check(r.status == OMNI_REACTOR_ERR_INVALID, "init rejects NULL poller");
-  check(!reactor.live, "failed init leaves reactor inert");
-
-  /* zero capacity */
-  r = omni_reactor_init(&reactor, &poller, callbacks, contexts, ready_masks,
-                        tokens_reactor, fds_reactor, registered, 0u);
-  check(r.status == OMNI_REACTOR_ERR_INVALID, "init rejects zero capacity");
-  check(!reactor.live, "zero capacity leaves reactor inert");
-
-  /* re-init a live reactor is not tested because the spec doesn't
-   * require it; the poller stays live but the reactor would remain live,
-   * which may be okay.
-   */
-
+  check(omni_reactor_capacity(&reactor) == 0u && omni_reactor_count(&reactor) == 0u,
+        "destroy leaves reactor inert");
   omni_reactor_destroy(&reactor);
   omni_poller_destroy(&poller);
 }
 
-/* ------------------------------------------------------------------- add */
+static void test_invalid_state_and_inputs(void) {
+  struct omni_poller inert_poller = { 0 };
+  struct omni_reactor reactor = { 0 };
+  struct omni_reactor_registration registrations[1];
+  struct omni_poller_event events[1];
+  struct pollfd poll_slots[1];
+  uint64_t poll_tokens[1];
+  int fds[2];
+  struct omni_reactor_result result;
 
-static void test_reactor_add(void) {
-  struct omni_poller poller;
-  struct omni_reactor reactor;
   omni_reactor_make_inert(&reactor);
+  result = omni_reactor_step(&reactor, 0);
+  check(result.status == OMNI_REACTOR_ERR_INVALID, "step on inert reactor is invalid");
+  result = omni_reactor_init(&reactor, &inert_poller, registrations, events, 1u);
+  check(result.status == OMNI_REACTOR_ERR_INVALID, "init rejects inert poller");
 
-  struct pollfd slots_poller[2];
-  uint64_t tokens_poller[2];
-  omni_poller_init_borrowed(&poller, slots_poller, tokens_poller, 2u);
+  check(init_poller(&inert_poller, poll_slots, poll_tokens, 1u),
+        "input-probe poller init succeeds");
+  result = omni_reactor_init(&reactor, &inert_poller, NULL, events, 1u);
+  check(result.status == OMNI_REACTOR_ERR_INVALID, "init rejects NULL registrations");
+  result = omni_reactor_init(&reactor, &inert_poller, registrations, NULL, 1u);
+  check(result.status == OMNI_REACTOR_ERR_INVALID, "init rejects NULL event storage");
+  result = omni_reactor_init(&reactor, &inert_poller, registrations, events, 0u);
+  check(result.status == OMNI_REACTOR_ERR_INVALID, "init rejects zero capacity");
 
-  int callbacks[2];
-  int contexts[2];
-  uint32_t ready_masks[2];
-  uint64_t tokens_reactor[2];
-  int fds_reactor[2];
-  bool registered[2];
+  result = omni_reactor_init(&reactor, &inert_poller, registrations, events, 1u);
+  check(result.status == OMNI_REACTOR_OK, "input-probe reactor init succeeds");
+  check(make_pipe(fds), "input-probe pipe opens");
+  result = omni_reactor_add(&reactor, fds[0], 1u, OMNI_POLLER_INTEREST_READ, NULL, NULL);
+  check(result.status == OMNI_REACTOR_ERR_INVALID && result.sys_errno == EINVAL,
+        "add rejects NULL callback");
+  result = omni_reactor_add(&reactor, -1, 1u, OMNI_POLLER_INTEREST_READ,
+                            capture_callback, NULL);
+  check(result.status == OMNI_REACTOR_ERR_INVALID, "add rejects negative descriptor");
+  result = omni_reactor_add(&reactor, fds[0], 1u, 0u, capture_callback, NULL);
+  check(result.status == OMNI_REACTOR_ERR_INVALID, "add rejects empty interest mask");
+  result = omni_reactor_step(&reactor, -1);
+  check(result.status == OMNI_REACTOR_ERR_INVALID, "step rejects negative timeout");
+  result = omni_reactor_step(&reactor, (int64_t)INT_MAX + (int64_t)1);
+  check(result.status == OMNI_REACTOR_ERR_INVALID, "step rejects timeout overflow");
 
-  omni_reactor_init(&reactor, &poller, callbacks, contexts, ready_masks,
-                    tokens_reactor, fds_reactor, registered, 2u);
-
-  int fd1, fd2;
-  make_socketpair(&fd1, &fd2);
-
-  uint64_t token1 = 0x100u;
-  uint64_t token2 = 0x200u;
-
-  struct omni_reactor_result r1 = omni_reactor_add(
-      &reactor, fd1, token1, OMNI_POLLER_INTEREST_READ, capture_callback,
-      (void *)0x1000);
-  check(r1.status == OMNI_REACTOR_OK && r1.sys_errno == 0 && r1.count == 0u,
-        "add first source succeeds");
-  check(omni_reactor_count(&reactor) == 1u, "reactor count increments");
-
-  struct omni_reactor_result r2 = omni_reactor_add(
-      &reactor, fd2, token2, OMNI_POLLER_INTEREST_WRITE, capture_callback,
-      (void *)0x2000);
-  check(r2.status == OMNI_REACTOR_OK && r2.sys_errno == 0 && r2.count == 0u,
-        "add second source succeeds");
-  check(omni_reactor_count(&reactor) == 2u, "reactor count increments");
-
-  /* duplicate token */
-  struct omni_reactor_result r3 = omni_reactor_add(
-      &reactor, fd1, token1, OMNI_POLLER_INTEREST_READ, capture_callback,
-      (void *)0x3000);
-  check(r3.status == OMNI_REACTOR_ERR_INVALID && r3.sys_errno == EEXIST,
-        "add rejects duplicate token");
-
-  /* capacity exhaustion */
-  struct omni_reactor_result r4 = omni_reactor_add(
-      &reactor, -1, 0x3000u, OMNI_POLLER_INTEREST_READ, capture_callback,
-      (void *)0x4000);
-  check(r4.status == OMNI_REACTOR_ERR_INVALID && r4.sys_errno == ENOSPC,
-        "add rejects full capacity");
-
-  reset_capture();
+  close(fds[0]);
+  close(fds[1]);
   omni_reactor_destroy(&reactor);
-  close(fd1);
-  close(fd2);
-  omni_poller_destroy(&poller);
+  omni_poller_destroy(&inert_poller);
 }
 
-/* ------------------------------------------------------------------- remove */
+static void test_registration_and_duplicates(void) {
+  struct omni_poller poller = { 0 };
+  struct omni_reactor reactor = { 0 };
+  struct pollfd poll_slots[2];
+  uint64_t poll_tokens[2];
+  struct omni_reactor_registration registrations[2];
+  struct omni_poller_event events[2];
+  struct callback_state first = { 0 };
+  struct callback_state second = { 0 };
+  int first_pipe[2];
+  int second_pipe[2];
+  struct omni_reactor_result result;
 
-static void test_reactor_remove(void) {
-  struct omni_poller poller;
-  struct omni_reactor reactor;
   omni_reactor_make_inert(&reactor);
+  check(init_poller(&poller, poll_slots, poll_tokens, 2u),
+        "registration poller init succeeds");
+  result = omni_reactor_init(&reactor, &poller, registrations, events, 2u);
+  check(result.status == OMNI_REACTOR_OK, "registration reactor init succeeds");
+  check(make_pipe(first_pipe) && make_pipe(second_pipe), "registration pipes open");
 
-  struct pollfd slots_poller[2];
-  uint64_t tokens_poller[2];
-  omni_poller_init_borrowed(&poller, slots_poller, tokens_poller, 2u);
+  result = omni_reactor_add(&reactor, first_pipe[0], 0x10u, OMNI_POLLER_INTEREST_READ,
+                            capture_callback, &first);
+  check(result.status == OMNI_REACTOR_OK && omni_reactor_count(&reactor) == 1u,
+        "first event source registers");
+  result = omni_reactor_add(&reactor, second_pipe[0], 0x20u, OMNI_POLLER_INTEREST_READ,
+                            capture_callback, &second);
+  check(result.status == OMNI_REACTOR_OK && omni_reactor_count(&reactor) == 2u,
+        "second event source registers");
 
-  int callbacks[2];
-  int contexts[2];
-  uint32_t ready_masks[2];
-  uint64_t tokens_reactor[2];
-  int fds_reactor[2];
-  bool registered[2];
+  result = omni_reactor_add(&reactor, second_pipe[1], 0x10u, OMNI_POLLER_INTEREST_WRITE,
+                            capture_callback, &second);
+  check(result.status == OMNI_REACTOR_ERR_DUPLICATE && result.sys_errno == EEXIST,
+        "duplicate token is rejected");
+  result = omni_reactor_add(&reactor, first_pipe[0], 0x30u, OMNI_POLLER_INTEREST_READ,
+                            capture_callback, &second);
+  check(result.status == OMNI_REACTOR_ERR_DUPLICATE && result.sys_errno == EEXIST,
+        "duplicate descriptor is rejected");
+  result = omni_reactor_add(&reactor, second_pipe[1], 0x30u, OMNI_POLLER_INTEREST_WRITE,
+                            capture_callback, &second);
+  check(result.status == OMNI_REACTOR_ERR_FULL && result.sys_errno == ENOSPC,
+        "full fixed capacity is rejected");
+  check(omni_reactor_count(&reactor) == 2u && omni_poller_count(&poller) == 2u,
+        "failed registrations leave state unchanged");
 
-  omni_reactor_init(&reactor, &poller, callbacks, contexts, ready_masks,
-                    tokens_reactor, fds_reactor, registered, 2u);
+  result = omni_reactor_remove(&reactor, 0x10u);
+  check(result.status == OMNI_REACTOR_OK && omni_reactor_count(&reactor) == 1u &&
+            omni_poller_count(&poller) == 1u,
+        "known registration removes from reactor and poller");
+  check(registrations[1].callback == NULL && registrations[1].context == NULL &&
+            registrations[1].fd == -1,
+        "removed registration clears callback context and descriptor");
+  result = omni_reactor_remove(&reactor, 0x10u);
+  check(result.status == OMNI_REACTOR_ERR_NOT_FOUND && result.sys_errno == ENOENT,
+        "second removal reports missing entry");
+  result = omni_reactor_remove(&reactor, 0x99u);
+  check(result.status == OMNI_REACTOR_ERR_NOT_FOUND, "unknown removal reports missing entry");
 
-  int fd1, fd2;
-  make_socketpair(&fd1, &fd2);
-
-  uint64_t token1 = 0x100u;
-  uint64_t token2 = 0x200u;
-
-  omni_reactor_add(&reactor, fd1, token1, OMNI_POLLER_INTEREST_READ,
-                   capture_callback, (void *)0x1000);
-  omni_reactor_add(&reactor, fd2, token2, OMNI_POLLER_INTEREST_WRITE,
-                   capture_callback, (void *)0x2000);
-
-  /* remove known token */
-  struct omni_reactor_result r1 = omni_reactor_remove(&reactor, token1);
-  check(r1.status == OMNI_REACTOR_OK && r1.sys_errno == 0 && r1.count == 0u,
-        "remove known token succeeds");
-  check(omni_reactor_count(&reactor) == 1u, "reactor count decrements");
-
-  /* remove again: NOT_FOUND */
-  struct omni_reactor_result r2 = omni_reactor_remove(&reactor, token1);
-  check(r2.status == OMNI_REACTOR_ERR_NOT_FOUND && r2.sys_errno == ENOENT,
-        "second remove reports not found");
-
-  /* remove unknown token */
-  struct omni_reactor_result r3 = omni_reactor_remove(&reactor, 0x999u);
-  check(r3.status == OMNI_REACTOR_ERR_NOT_FOUND && r3.sys_errno == ENOENT,
-        "remove unknown token reports not found");
-
-  struct omni_reactor_result r4 = omni_reactor_remove(&reactor, token2);
-  check(r4.status == OMNI_REACTOR_OK && r4.sys_errno == 0 && r4.count == 0u,
-        "remove remaining token succeeds");
-  check(omni_reactor_count(&reactor) == 0u, "reactor count reaches zero");
-
-  close(fd1);
-  close(fd2);
+  result = omni_reactor_remove(&reactor, 0x20u);
+  check(result.status == OMNI_REACTOR_OK && omni_reactor_count(&reactor) == 0u,
+        "remaining registration removes");
+  close(first_pipe[0]);
+  close(first_pipe[1]);
+  close(second_pipe[0]);
+  close(second_pipe[1]);
   omni_reactor_destroy(&reactor);
   omni_poller_destroy(&poller);
 }
 
-/* ------------------------------------------------------------------- step */
+static void test_empty_and_timeout_steps(void) {
+  struct omni_poller poller = { 0 };
+  struct omni_reactor reactor = { 0 };
+  struct pollfd poll_slots[1];
+  uint64_t poll_tokens[1];
+  struct omni_reactor_registration registrations[1];
+  struct omni_poller_event events[1];
+  int fds[2];
+  struct omni_reactor_result result;
 
-static void test_reactor_step_empty(void) {
-  struct omni_poller poller;
-  struct omni_reactor reactor;
   omni_reactor_make_inert(&reactor);
+  check(init_poller(&poller, poll_slots, poll_tokens, 1u),
+        "timeout poller init succeeds");
+  result = omni_reactor_init(&reactor, &poller, registrations, events, 1u);
+  check(result.status == OMNI_REACTOR_OK, "timeout reactor init succeeds");
 
-  struct pollfd slots_poller[1];
-  uint64_t tokens_poller[1];
-  omni_poller_init_borrowed(&poller, slots_poller, tokens_poller, 1u);
+  result = omni_reactor_step(&reactor, 0);
+  check(result.status == OMNI_REACTOR_OK && result.count == 0u,
+        "empty reactor zero-time step returns immediately");
+  result = omni_reactor_step(&reactor, 25);
+  check(result.status == OMNI_REACTOR_OK && result.count == 0u,
+        "empty reactor positive-time step returns immediately");
 
-  int callbacks[1];
-  int contexts[1];
-  uint32_t ready_masks[1];
-  uint64_t tokens_reactor[1];
-  int fds_reactor[1];
-  bool registered[1];
+  check(make_pipe(fds), "timeout pipe opens");
+  result = omni_reactor_add(&reactor, fds[0], 0x55u, OMNI_POLLER_INTEREST_READ,
+                            capture_callback, NULL);
+  check(result.status == OMNI_REACTOR_OK, "timeout source registers");
+  result = omni_reactor_step(&reactor, 25);
+  check(result.status == OMNI_REACTOR_OK && result.count == 0u,
+        "positive timeout with no readiness returns without callback");
+  result = omni_reactor_step(&reactor, 0);
+  check(result.status == OMNI_REACTOR_OK && result.count == 0u,
+        "zero timeout with no readiness returns without callback");
 
-  omni_reactor_init(&reactor, &poller, callbacks, contexts, ready_masks,
-                    tokens_reactor, fds_reactor, registered, 1u);
-
-  struct omni_reactor_result r = omni_reactor_step(&reactor, 0);
-  check(r.status == OMNI_REACTOR_OK && r.sys_errno == 0 && r.count == 0u,
-        "step on empty reactor returns OK");
-
-  reset_capture();
+  close(fds[0]);
+  close(fds[1]);
   omni_reactor_destroy(&reactor);
   omni_poller_destroy(&poller);
 }
 
-static void test_reactor_step_zero_timeout(void) {
-  struct omni_poller poller;
-  struct omni_reactor reactor;
+static void test_read_write_dispatch(void) {
+  struct omni_poller poller = { 0 };
+  struct omni_reactor reactor = { 0 };
+  struct pollfd poll_slots[2];
+  uint64_t poll_tokens[2];
+  struct omni_reactor_registration registrations[2];
+  struct omni_poller_event events[2];
+  struct callback_state readable = { 0 };
+  struct callback_state writable = { 0 };
+  int pipe_fds[2];
+  unsigned char byte = 0xA5u;
+  unsigned char received = 0u;
+  struct omni_reactor_result result;
+
   omni_reactor_make_inert(&reactor);
+  check(init_poller(&poller, poll_slots, poll_tokens, 2u),
+        "dispatch poller init succeeds");
+  result = omni_reactor_init(&reactor, &poller, registrations, events, 2u);
+  check(result.status == OMNI_REACTOR_OK, "dispatch reactor init succeeds");
+  check(make_pipe(pipe_fds), "dispatch pipe opens");
 
-  struct pollfd slots_poller[2];
-  uint64_t tokens_poller[2];
-  omni_poller_init_borrowed(&poller, slots_poller, tokens_poller, 2u);
+  result = omni_reactor_add(&reactor, pipe_fds[0], 0x101u, OMNI_POLLER_INTEREST_READ,
+                            capture_callback, &readable);
+  check(result.status == OMNI_REACTOR_OK, "read source registers");
+  result = omni_reactor_add(&reactor, pipe_fds[1], 0x202u, OMNI_POLLER_INTEREST_WRITE,
+                            capture_callback, &writable);
+  check(result.status == OMNI_REACTOR_OK, "write source registers");
 
-  int callbacks[2];
-  int contexts[2];
-  uint32_t ready_masks[2];
-  uint64_t tokens_reactor[2];
-  int fds_reactor[2];
-  bool registered[2];
+  check(write(pipe_fds[1], &byte, sizeof(byte)) == (ssize_t)sizeof(byte),
+        "dispatch stimulus writes one byte");
+  result = omni_reactor_step(&reactor, 0);
+  check(result.status == OMNI_REACTOR_OK && result.count == 2u,
+        "one step dispatches every ready source");
+  check(readable.calls == 1u && readable.token == 0x101u &&
+            (readable.events & OMNI_POLLER_READY_READ) != 0u &&
+            readable.context == &readable,
+        "read callback receives token mask and context");
+  check(writable.calls == 1u && writable.token == 0x202u &&
+            (writable.events & OMNI_POLLER_READY_WRITE) != 0u &&
+            writable.context == &writable,
+        "write callback receives token mask and context");
+  check(read(pipe_fds[0], &received, sizeof(received)) == (ssize_t)sizeof(received) &&
+            received == byte,
+        "reactor reports readiness without reading payload");
+  check(fd_is_open(pipe_fds[0]) && fd_is_open(pipe_fds[1]),
+        "reactor does not close event-source descriptors");
 
-  omni_reactor_init(&reactor, &poller, callbacks, contexts, ready_masks,
-                    tokens_reactor, fds_reactor, registered, 2u);
-
-  int fd1, fd2;
-  make_socketpair(&fd1, &fd2);
-
-  uint64_t token1 = 0x100u;
-  uint64_t token2 = 0x200u;
-
-  omni_reactor_add(&reactor, fd1, token1, OMNI_POLLER_INTEREST_READ,
-                   capture_callback, (void *)0x1000);
-  omni_reactor_add(&reactor, fd2, token2, OMNI_POLLER_INTEREST_WRITE,
-                   capture_callback, (void *)0x2000);
-
-  /* Make fd1 ready (write) so poller will report OMNI_POLLER_READY_WRITE */
-  char dummy = 'x';
-  write(fd1, &dummy, 1); // Writing to fd1 makes it readable
-
-  struct omni_reactor_result r = omni_reactor_step(&reactor, 0);
-  check(r.status == OMNI_REACTOR_OK && r.sys_errno == 0 && r.count == 1u,
-        "step with zero timeout processes ready events");
-
-  check(last_token_seen == token1, "callback token matches");
-  check((last_events_seen & OMNI_POLLER_READY_READ) != 0u, "callback includes READ");
-
-  close(fd1);
-  close(fd2);
-  reset_capture();
+  result = omni_reactor_remove(&reactor, 0x101u);
+  check(result.status == OMNI_REACTOR_OK, "read source removes after dispatch");
+  result = omni_reactor_remove(&reactor, 0x202u);
+  check(result.status == OMNI_REACTOR_OK, "write source removes after dispatch");
+  close(pipe_fds[0]);
+  close(pipe_fds[1]);
   omni_reactor_destroy(&reactor);
   omni_poller_destroy(&poller);
 }
 
-static void test_reactor_step_positive_timeout(void) {
-  struct omni_poller poller;
-  struct omni_reactor reactor;
+static void test_error_dispatch(void) {
+  struct omni_poller poller = { 0 };
+  struct omni_reactor reactor = { 0 };
+  struct pollfd poll_slots[1];
+  uint64_t poll_tokens[1];
+  struct omni_reactor_registration registrations[1];
+  struct omni_poller_event events[1];
+  struct callback_state error_state = { 0 };
+  int pipe_fds[2];
+  struct omni_reactor_result result;
+
   omni_reactor_make_inert(&reactor);
+  check(init_poller(&poller, poll_slots, poll_tokens, 1u),
+        "error poller init succeeds");
+  result = omni_reactor_init(&reactor, &poller, registrations, events, 1u);
+  check(result.status == OMNI_REACTOR_OK, "error reactor init succeeds");
+  check(make_pipe(pipe_fds), "error pipe opens");
+  close(pipe_fds[0]);
 
-  struct pollfd slots_poller[1];
-  uint64_t tokens_poller[1];
-  omni_poller_init_borrowed(&poller, slots_poller, tokens_poller, 1u);
+  result = omni_reactor_add(&reactor, pipe_fds[1], 0xE01u, OMNI_POLLER_INTEREST_WRITE,
+                            capture_callback, &error_state);
+  check(result.status == OMNI_REACTOR_OK, "error source registers");
+  result = omni_reactor_step(&reactor, 0);
+  check(result.status == OMNI_REACTOR_OK && result.count == 1u,
+        "error step dispatches one event");
+  check(error_state.calls == 1u && error_state.token == 0xE01u &&
+            (error_state.events & OMNI_POLLER_READY_ERROR) != 0u,
+        "error readiness reaches callback");
 
-  int callbacks[1];
-  int contexts[1];
-  uint32_t ready_masks[1];
-  uint64_t tokens_reactor[1];
-  int fds_reactor[1];
-  bool registered[1];
-
-  omni_reactor_init(&reactor, &poller, callbacks, contexts, ready_masks,
-                    tokens_reactor, fds_reactor, registered, 1u);
-
-  int fd1, fd2;
-  make_socketpair(&fd1, &fd2);
-
-  uint64_t token1 = 0x100u;
-
-  omni_reactor_add(&reactor, fd1, token1, OMNI_POLLER_INTEREST_READ,
-                   capture_callback, (void *)0x1000);
-
-  struct omni_reactor_result r = omni_reactor_step(&reactor, 100);
-  check(r.status == OMNI_REACTOR_OK && r.sys_errno == 0 && r.count == 0u,
-        "step with positive timeout returns when no events");
-
-  close(fd1);
-  close(fd2);
-  reset_capture();
+  result = omni_reactor_remove(&reactor, 0xE01u);
+  check(result.status == OMNI_REACTOR_OK, "error source removes");
+  close(pipe_fds[1]);
   omni_reactor_destroy(&reactor);
   omni_poller_destroy(&poller);
 }
 
-/* ------------------------------------------------------------------- update */
+static void test_interrupted_step(void) {
+  struct omni_poller poller = { 0 };
+  struct omni_reactor reactor = { 0 };
+  struct pollfd poll_slots[1];
+  uint64_t poll_tokens[1];
+  struct omni_reactor_registration registrations[1];
+  struct omni_poller_event events[1];
+  struct callback_state state = { 0 };
+  struct sigaction action;
+  struct sigaction old_action;
+  struct itimerval timer;
+  int pipe_fds[2];
+  struct omni_reactor_result result;
+  bool handler_installed = false;
 
-static void test_reactor_update(void) {
-  struct omni_poller poller;
-  struct omni_reactor reactor;
   omni_reactor_make_inert(&reactor);
+  check(init_poller(&poller, poll_slots, poll_tokens, 1u),
+        "interrupt poller init succeeds");
+  result = omni_reactor_init(&reactor, &poller, registrations, events, 1u);
+  check(result.status == OMNI_REACTOR_OK, "interrupt reactor init succeeds");
+  check(make_pipe(pipe_fds), "interrupt pipe opens");
+  result = omni_reactor_add(&reactor, pipe_fds[0], 0x1Eu, OMNI_POLLER_INTEREST_READ,
+                            capture_callback, &state);
+  check(result.status == OMNI_REACTOR_OK, "interrupt source registers");
 
-  struct pollfd slots_poller[2];
-  uint64_t tokens_poller[2];
-  omni_poller_init_borrowed(&poller, slots_poller, tokens_poller, 2u);
+  memset(&action, 0, sizeof(action));
+  action.sa_handler = on_alarm;
+  sigemptyset(&action.sa_mask);
+  action.sa_flags = 0;
+  if (sigaction(SIGALRM, &action, &old_action) == 0) {
+    handler_installed = true;
+  }
+  check(handler_installed, "interrupt signal handler installs");
+  if (handler_installed) {
+    memset(&timer, 0, sizeof(timer));
+    timer.it_value.tv_usec = 20000;
+    check(setitimer(ITIMER_REAL, &timer, NULL) == 0, "interrupt timer starts");
+    result = omni_reactor_step(&reactor, 1000);
+    memset(&timer, 0, sizeof(timer));
+    (void)setitimer(ITIMER_REAL, &timer, NULL);
+    (void)sigaction(SIGALRM, &old_action, NULL);
+    check(result.status == OMNI_REACTOR_ERR_INTERRUPTED && result.count == 0u &&
+              result.sys_errno == EINTR,
+          "interrupted step returns bounded interrupted status");
+    check(state.calls == 0u && omni_reactor_count(&reactor) == 1u &&
+              omni_poller_count(&poller) == 1u,
+          "interrupted step preserves registrations and dispatches nothing");
+  }
 
-  int callbacks[2];
-  int contexts[2];
-  uint32_t ready_masks[2];
-  uint64_t tokens_reactor[2];
-  int fds_reactor[2];
-  bool registered[2];
-
-  omni_reactor_init(&reactor, &poller, callbacks, contexts, ready_masks,
-                    tokens_reactor, fds_reactor, registered, 2u);
-
-  int fd1, fd2;
-  make_socketpair(&fd1, &fd2);
-
-  uint64_t token1 = 0x100u;
-
-  omni_reactor_add(&reactor, fd1, token1, OMNI_POLLER_INTEREST_READ,
-                   capture_callback, (void *)0x1000);
-
-  /* Update interests */
-  struct omni_reactor_result r = omni_reactor_update(
-      &reactor, token1, OMNI_POLLER_INTEREST_WRITE);
-  check(r.status == OMNI_REACTOR_OK && r.sys_errno == 0 && r.count == 0u,
-        "update changes interests");
-
-  /* Unknown token */
-  struct omni_reactor_result r2 = omni_reactor_update(&reactor, 0x999u,
-                                                      OMNI_POLLER_INTEREST_READ);
-  check(r2.status == OMNI_REACTOR_ERR_NOT_FOUND && r2.sys_errno == ENOENT,
-        "update unknown token reports not found");
-
-  /* Invalid mask */
-  struct omni_reactor_result r3 = omni_reactor_update(&reactor, token1, 0u);
-  check(r3.status == OMNI_REACTOR_ERR_INVALID && r3.sys_errno == EINVAL,
-        "update rejects zero mask");
-
-  close(fd1);
-  close(fd2);
-  reset_capture();
+  result = omni_reactor_remove(&reactor, 0x1Eu);
+  check(result.status == OMNI_REACTOR_OK, "interrupt source removes");
+  close(pipe_fds[0]);
+  close(pipe_fds[1]);
   omni_reactor_destroy(&reactor);
   omni_poller_destroy(&poller);
 }
 
-/* ------------------------------------------------------------------- stress */
+static void test_repeated_add_remove_and_steps(void) {
+  struct omni_poller poller = { 0 };
+  struct omni_reactor reactor = { 0 };
+  struct pollfd poll_slots[2];
+  uint64_t poll_tokens[2];
+  struct omni_reactor_registration registrations[2];
+  struct omni_poller_event events[2];
+  struct callback_state state = { 0 };
+  int pipe_fds[2];
+  struct omni_reactor_result result;
+  bool cycles_ok = true;
+  bool steps_ok = true;
+  uint32_t cycle = 0u;
+  uint32_t step = 0u;
 
-static void test_reactor_stress_add_remove(void) {
-  struct omni_poller poller;
-  struct omni_reactor reactor;
   omni_reactor_make_inert(&reactor);
+  check(init_poller(&poller, poll_slots, poll_tokens, 2u),
+        "stress poller init succeeds");
+  result = omni_reactor_init(&reactor, &poller, registrations, events, 2u);
+  check(result.status == OMNI_REACTOR_OK, "stress reactor init succeeds");
+  check(make_pipe(pipe_fds), "stress pipe opens");
 
-  /* Use larger capacity to support stress cycles */
-  struct pollfd slots_poller[100];
-  uint64_t tokens_poller[100];
-  omni_poller_init_borrowed(&poller, slots_poller, tokens_poller, 100u);
+  for (cycle = 0u; cycle < 1000u; ++cycle) {
+    uint64_t token = (uint64_t)cycle + 1u;
 
-  int callbacks[100];
-  int contexts[100];
-  uint32_t ready_masks[100];
-  uint64_t tokens_reactor[100];
-  int fds_reactor[100];
-  bool registered[100];
-
-  omni_reactor_init(&reactor, &poller, callbacks, contexts, ready_masks,
-                    tokens_reactor, fds_reactor, registered, 100u);
-
-  for (uint32_t cycle = 0u; cycle < 1000u; ++cycle) {
-    int pair[2];
-    make_socketpair(pair);
-    int fd1 = pair[0];
-    int fd2 = pair[1];
-
-    uint64_t token1 = cycle + 1u;
-    uint64_t token2 = (cycle + 1000u) + 1u;
-
-    struct omni_reactor_result r1 = omni_reactor_add(
-        &reactor, fd1, token1, OMNI_POLLER_INTEREST_READ, capture_callback,
-        (void *)cycle);
-    check(r1.status == OMNI_REACTOR_OK && r1.sys_errno == 0 && r1.count == 0u,
-          "stress add first source succeeds");
-
-    struct omni_reactor_result r2 = omni_reactor_add(
-        &reactor, fd2, token2, OMNI_POLLER_INTEREST_WRITE, capture_callback,
-        (void *)((size_t)cycle + 0x2000));
-    check(r2.status == OMNI_REACTOR_OK && r2.sys_errno == 0 && r2.count == 0u,
-          "stress add second source succeeds");
-
-    if (cycle % 2 == 0) {
-      struct omni_reactor_result r3 = omni_reactor_remove(&reactor, token1);
-      check(r3.status == OMNI_REACTOR_OK && r3.sys_errno == 0 && r3.count == 0u,
-            "stress remove first source succeeds");
+    result = omni_reactor_add(&reactor, pipe_fds[0], token, OMNI_POLLER_INTEREST_READ,
+                              capture_callback, &state);
+    if (result.status != OMNI_REACTOR_OK || omni_reactor_count(&reactor) != 1u) {
+      cycles_ok = false;
+      break;
     }
-
-    if (cycle % 3 == 0) {
-      struct omni_reactor_result r4 = omni_reactor_remove(&reactor, token2);
-      check(r4.status == OMNI_REACTOR_OK && r4.sys_errno == 0 && r4.count == 0u,
-            "stress remove second source succeeds");
-    }
-
-    close(fd1);
-    close(fd2);
-  }
-
-  /* Should end with few live entries (capacity may be partially filled) */
-  size_t remaining = omni_reactor_count(&reactor);
-  check(remaining < 100u, "stress leaves reactor below capacity");
-
-  omni_reactor_destroy(&reactor);
-  omni_poller_destroy(&poller);
-}
-
-static void test_reactor_stress_step(void) {
-  struct omni_poller poller;
-  struct omni_reactor reactor;
-  omni_reactor_make_inert(&reactor);
-
-  struct pollfd slots_poller[10];
-  uint64_t tokens_poller[10];
-  omni_poller_init_borrowed(&poller, slots_poller, tokens_poller, 10u);
-
-  int callbacks[10];
-  int contexts[10];
-  uint32_t ready_masks[10];
-  uint64_t tokens_reactor[10];
-  int fds_reactor[10];
-  bool registered[10];
-
-  omni_reactor_init(&reactor, &poller, callbacks, contexts, ready_masks,
-                    tokens_reactor, fds_reactor, registered, 10u);
-
-  /* Create several socketpairs for stress testing */
-  int pairs[20][2];
-  for (int i = 0; i < 20; i += 2) {
-    make_socketpair(pairs[i / 2]);
-  }
-
-  for (int i = 0; i < 10; i += 2) {
-    uint64_t token = (uint64_t)i + 0x1000u;
-    omni_reactor_add(&reactor, pairs[i / 2][0], token, OMNI_POLLER_INTEREST_READ,
-                     capture_callback, (void *)((size_t)i + 0x1000));
-  }
-
-  /* Step with zero timeout; some may be ready due to writes
-   * already performed by make_socketpair (handshake buffers).
-   */
-  for (uint32_t step = 0u; step < 50u; ++step) {
-    struct omni_reactor_result r = omni_reactor_step(&reactor, 0);
-    /* step can return OK with zero or one count; both are fine */
-    check(r.status == OMNI_REACTOR_OK || r.status == OMNI_REACTOR_ERR_INTERRUPTED,
-          "step either succeeds or returns INTERRUPTED");
-    if (r.status == OMNI_REACTOR_OK) {
-      check(r.count <= 10u, "processed count does not exceed capacity");
+    result = omni_reactor_remove(&reactor, token);
+    if (result.status != OMNI_REACTOR_OK || omni_reactor_count(&reactor) != 0u ||
+        omni_poller_count(&poller) != 0u) {
+      cycles_ok = false;
+      break;
     }
   }
+  check(cycles_ok, "repeated add/remove stays bounded and reusable");
 
-  for (int i = 0; i < 10; ++i) {
-    close(pairs[i][0]);
-    close(pairs[i][1]);
+  result = omni_reactor_add(&reactor, pipe_fds[0], 0x777u, OMNI_POLLER_INTEREST_READ,
+                            capture_callback, &state);
+  check(result.status == OMNI_REACTOR_OK, "repeated-step source registers");
+  for (step = 0u; step < 1000u; ++step) {
+    result = omni_reactor_step(&reactor, 0);
+    if (result.status != OMNI_REACTOR_OK || result.count != 0u) {
+      steps_ok = false;
+      break;
+    }
   }
+  check(steps_ok, "repeated zero-time steps remain bounded");
+  check(write(pipe_fds[1], "r", (size_t)1) == (ssize_t)1,
+        "repeated-step stimulus writes one byte");
+  result = omni_reactor_step(&reactor, 0);
+  check(result.status == OMNI_REACTOR_OK && result.count == 1u && state.calls == 1u,
+        "repeated-step reactor still dispatches after stress");
+  result = omni_reactor_remove(&reactor, 0x777u);
+  check(result.status == OMNI_REACTOR_OK, "repeated-step source removes");
 
+  close(pipe_fds[0]);
+  close(pipe_fds[1]);
   omni_reactor_destroy(&reactor);
   omni_poller_destroy(&poller);
 }
 
-static void print_summary(void) {
-  printf("\n=== Reactor unit tests summary ===\n");
-  printf("Total checks: %d\n", check_count);
-  printf("Failures: %d\n", failure_count);
-  printf("Success rate: %.2f%%\n",
-          (check_count == 0) ? 0.0 : (100.0 * (check_count - failure_count) / check_count));
+static void test_destroy_unregisters_without_closing(void) {
+  struct omni_poller poller = { 0 };
+  struct omni_reactor reactor = { 0 };
+  struct pollfd poll_slots[1];
+  uint64_t poll_tokens[1];
+  struct omni_reactor_registration registrations[1];
+  struct omni_poller_event events[1];
+  struct callback_state state = { 0 };
+  int pipe_fds[2];
+  struct omni_reactor_result result;
+
+  omni_reactor_make_inert(&reactor);
+  check(init_poller(&poller, poll_slots, poll_tokens, 1u),
+        "destroy poller init succeeds");
+  result = omni_reactor_init(&reactor, &poller, registrations, events, 1u);
+  check(result.status == OMNI_REACTOR_OK, "destroy reactor init succeeds");
+  check(make_pipe(pipe_fds), "destroy pipe opens");
+  result = omni_reactor_add(&reactor, pipe_fds[0], 0xD01u, OMNI_POLLER_INTEREST_READ,
+                            capture_callback, &state);
+  check(result.status == OMNI_REACTOR_OK, "destroy source registers");
+
+  omni_reactor_destroy(&reactor);
+  check(omni_poller_count(&poller) == 0u && fd_is_open(pipe_fds[0]) &&
+            registrations[0].callback == NULL && registrations[0].context == NULL,
+        "destroy unregisters without closing or retaining callback state");
+  close(pipe_fds[0]);
+  close(pipe_fds[1]);
+  omni_poller_destroy(&poller);
 }
 
 int main(void) {
-  /* Initialize results counters */
-  check_count = 0;
-  failure_count = 0;
-
   printf("=== Starting reactor unit tests (Task 021) ===\n");
 
-  test_reactor_init();
-  test_reactor_init_rejects();
-  test_reactor_add();
-  test_reactor_remove();
-  test_reactor_step_empty();
-  test_reactor_step_zero_timeout();
-  test_reactor_step_positive_timeout();
-  test_reactor_update();
-  test_reactor_stress_add_remove();
-  test_reactor_stress_step();
+  test_lifecycle();
+  test_invalid_state_and_inputs();
+  test_registration_and_duplicates();
+  test_empty_and_timeout_steps();
+  test_read_write_dispatch();
+  test_error_dispatch();
+  test_interrupted_step();
+  test_repeated_add_remove_and_steps();
+  test_destroy_unregisters_without_closing();
 
-  print_summary();
-
-  return failure_count > 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+  printf("Total checks: %zu\n", check_count);
+  printf("Failures: %zu\n", failure_count);
+  return failure_count == 0u ? EXIT_SUCCESS : EXIT_FAILURE;
 }
