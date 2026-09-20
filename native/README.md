@@ -432,6 +432,78 @@ send/receive layers absent from its `nm` symbol set. The three measured
 1,748/1,748 kB; these are one-shot process measurements, not send-runtime
 memory accounting.
 
+## Protocol-agnostic connection lifecycle (Task 019)
+
+The first long-lived native object is now implemented in
+`include/omniroute/connection.h` and `src/connection.c`, with
+`tests/test_connection.c` covering 69 checks through CTest `connection-unit`.
+It is a caller-storage-backed, protocol-agnostic owner: no HTTP, parser,
+request, response, TLS, provider, database, output queue, or event loop is
+part of this layer.
+
+- **Preparation and adoption**: `omni_connection_make_inert` prepares fresh
+  caller-owned struct storage; `omni_connection_init` borrows one finite
+  receive backing range and stores an opaque poller token plus a validated
+  READ/WRITE interest mask; `omni_connection_from_accepted` then moves one
+  live `omni_accepted` owner into the prepared object. Failed preparation or
+  adoption does not steal the accepted FD.
+- **Explicit state machine**: the only published transitions are
+  `INERT -> READY -> OPEN -> CLOSING -> CLOSED`. `READY` owns only its
+  connection-local byte-buffer object and metadata; `OPEN` owns the accepted
+  FD and permits I/O; `CLOSING` retains the FD but rejects new payload I/O;
+  `CLOSED` has released both resources. `omni_connection_destroy` is
+  idempotent and destroys the byte-buffer object before the accepted owner,
+  which closes the FD exactly once. FD 0 remains valid because liveness is
+  explicit rather than numeric.
+- **Receive/send composition**: `omni_connection_recv_once` and
+  `omni_connection_recv_drain` delegate to Task 017 and write directly into
+  the bounded connection-local `omni_bytebuf`. `omni_connection_send_once`
+  and `omni_connection_send_drain` delegate to Task 018, borrowing an
+  immutable caller span without retaining its pointer, length, or offset.
+  EOF, would-block, interruption, and peer/fatal errors remain primitive
+  results; the connection never closes itself or changes state implicitly.
+- **Poller relationship**: token and interest metadata are views only. The
+  connection never calls, registers with, updates, or removes a poller. The
+  caller registers `omni_connection_fd` externally and removes that
+  registration before destroy.
+- **Bounded memory**: connection production code has no heap calls and no
+  growth path. The receive backing remains caller-owned and must outlive the
+  connection; destroying the connection releases only the embedded borrowed
+  byte-buffer object, not the caller's storage. There is no output storage.
+- **Integration proof**: the focused suite verifies accepted-owner transfer,
+  failed-initialization preservation, binary NUL/high-byte receive and send,
+  exact partial-send offset resumption, bounded `LIMIT_REACHED`, EOF and
+  reset handling, external WRITE readiness, FD-0 ownership, SIGPIPE-safe
+  peer failure, bystander survival, repeated destroy, 64-cycle lifecycle
+  stress, 256 KiB byte-stream stress, and `/proc/self/fd` return to baseline.
+- **Boundary gate**: the updated gate keeps direct socket setup, accept,
+  receive, send, readiness, and descriptor lifecycle in their dedicated
+  modules; `connection.c` is authorized only for lifecycle composition and
+  primitive delegation. It adds no direct socket call or heap call, and the
+  gate continues to reject generic I/O, event-loop backends, threads, TLS,
+  HTTP, and output-queue code.
+
+`main` still links only `src/main.c` and `src/meminfo.c`; `omni_connection` is
+linked only into `test_connection`, so normal `omniroute-native` startup
+remains the Task 011 short-lived executable.
+
+Task 019 validation record (2026-09-20): the focused `connection-unit` test
+passed 69 checks with zero failures, and the updated network-boundary gate
+passed. The complete compiler/sanitizer matrix and regression sweep are
+recorded after the final validation run below.
+
+Final Task 019 validation detail: GCC Debug, GCC Release, Clang Debug, Clang
+Release, GCC ASan+UBSan Debug, and Clang ASan+UBSan Debug each built
+warning-clean and passed all 17 CTest cases. The focused connection suite was
+also repeated five times at 69 checks with zero failures. `npm run
+check:docs-all` passed documentation sync, frontmatter, environment sync,
+internal links, and fabricated-doc checks; it retained only the repository's
+pre-existing soft count/version/date drift warnings. The GCC Release
+`omniroute-native` remained 16,640 bytes (`size` dec 4,767), with RSS/HWM
+samples of 1,748/1,748, 1,748/1,748, and 1,752/1,752 kB; connection symbols
+and native socket-layer symbols remained absent because the connection library
+is test-only linked.
+
 ## Initial baseline (Task 011, measured 2026-09-19)
 
 Environment: Linux 7.2.4-zen2 x86_64, 8 CPUs, 16 GiB RAM; GCC 16.2.1,
@@ -501,8 +573,8 @@ from the migration design happens when iOS work starts.
 
 ## Intentionally deferred
 
-Event loop (epoll/io_uring/threads), connection objects, output queues and
-connection write state, HTTP, `/health`, `/v1/models`, TLS, SQLite, crypto,
+Event loop (epoll/io_uring/threads), production connection dispatcher,
+output queues and connection write state, HTTP, `/health`, `/v1/models`, TLS, SQLite, crypto,
 auth, providers, routing, streaming, compression, MCP, A2A,
 Objective-C/Swift/assembly.
 (Arenas, byte buffers, listener lifecycle, readiness observation,

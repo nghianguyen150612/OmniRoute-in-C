@@ -346,6 +346,14 @@ recovery RSS: …  VmHWM: …  Threads: …  FDs: …
     bounding, zero-length no-op, and bounded-drain LIMIT_REACHED outcomes
     remain explicit. There is still no output queue, output byte buffer,
     response state, or HTTP wiring.
+  - Protocol-agnostic connection owner implemented (Task 019,
+    `native/src/connection.c`, `omni_connection_*`): caller-prepared bounded
+    receive storage, explicit INERT/READY/OPEN/CLOSING/CLOSED lifecycle,
+    accepted-FD ownership transfer, exactly-once destruction through the
+    accepted owner, FD-0-safe liveness, and borrowed poller token/interest
+    metadata. Receive and send remain delegated to the Task 017/018
+    primitives; there is no automatic poller registration, output queue,
+    output storage, HTTP state, event loop, or heap allocation.
 - Caches: global byte budget (e.g. single-digit MiB default on iOS, higher
   on Linux via config), per-cache caps, idle eviction; heavy caches
   (catalog, embeddings) releasable.

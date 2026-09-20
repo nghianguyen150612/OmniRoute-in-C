@@ -83,6 +83,15 @@ add_library(omni_recv STATIC
 add_library(omni_send STATIC
   src/send.c)
 
+# Protocol-agnostic connection ownership composes the accepted owner, the
+# bounded receive buffer, and the existing recv/send primitives. It is linked
+# only into connection tests: omniroute-native remains a short-lived,
+# socket-free executable until a later server-runtime task deliberately wires
+# a connection dispatcher in.
+
+add_library(omni_connection STATIC
+  src/connection.c)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
@@ -94,6 +103,7 @@ target_include_directories(omni_poller PUBLIC include)
 target_include_directories(omni_accepted PUBLIC include)
 target_include_directories(omni_recv PUBLIC include)
 target_include_directories(omni_send PUBLIC include)
+target_include_directories(omni_connection PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 # Strong warning set for GCC and Clang; warnings are errors on every native
@@ -125,6 +135,7 @@ omni_apply_native_flags(omni_poller)
 omni_apply_native_flags(omni_accepted)
 omni_apply_native_flags(omni_recv)
 omni_apply_native_flags(omni_send)
+omni_apply_native_flags(omni_connection)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)

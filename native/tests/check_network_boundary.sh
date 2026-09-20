@@ -3,16 +3,18 @@
 # in the deliberate networking layer (src/listener.c owns socket lifecycle,
 # src/poller.c owns the readiness wait, src/accepted.c owns the accept4
 # drain plus accepted-descriptor lifecycle, src/recv.c owns nonblocking
-# socket receive into byte buffers, and src/send.c owns nonblocking socket
-# send with its required per-call SIGPIPE guard). Every other production
-# module (arena, bytebuf, meminfo, main, all other headers and sources) must stay
-# socket-free, and the deferred layers — event loop, output queues, generic
-# payload read/write, DNS/client, threads, TLS — stay banned from
-# ALL production sources, including the networking layer itself except for
-# the one authorized send call in src/send.c. The accept path is confined to
-# src/accepted.c, the receive path to src/recv.c, and the send path to
-# src/send.c exactly as the readiness wait is confined to src/poller.c. Later
-# tasks extend this gate explicitly; they never loosen it silently.
+# socket receive into byte buffers, src/send.c owns nonblocking socket send
+# with its required per-call SIGPIPE guard, and src/connection.c owns the
+# higher-level transfer/lifecycle composition without direct socket calls.
+# Every other production module (arena, bytebuf, meminfo, main, all other
+# headers and sources) must stay socket-free, and the deferred layers — event
+# loop, output queues, generic payload read/write, DNS/client, threads, TLS —
+# stay banned from ALL production sources, including the networking layer
+# itself except for the one authorized send call in src/send.c. The accept
+# path is confined to src/accepted.c, the receive path to src/recv.c, the
+# send path to src/send.c, and connection composition to src/connection.c,
+# exactly as the readiness wait is confined to src/poller.c. Later tasks
+# extend this gate explicitly; they never loosen it silently.
 #
 # Tests under tests/ are intentionally NOT scanned: the loopback tests
 # legitimately use client-side sockets and controlled test-client sends.
@@ -46,9 +48,9 @@ fi
 FD_ONLY='\<(fcntl|close)\s*\('
 
 FD_LEAKS=$(grep -rEn --include='*.c' --include='*.h' "$FD_ONLY" \
-  "$NATIVE_DIR/src" "$NATIVE_DIR/include" | grep -v '/src/listener\.c:' | grep -v '/src/accepted\.c:') || true
+  "$NATIVE_DIR/src" "$NATIVE_DIR/include" | grep -v '/src/listener\.c:' | grep -v '/src/accepted\.c:' | grep -v '/src/connection\.c:') || true
 if [ -n "$FD_LEAKS" ]; then
-  echo "FAIL: descriptor-lifecycle call outside src/listener.c and src/accepted.c (see match above)" >&2
+  echo "FAIL: descriptor-lifecycle call outside src/listener.c, src/accepted.c, and src/connection.c (see match above)" >&2
   echo "$FD_LEAKS" >&2
   FAIL=1
 fi
@@ -169,9 +171,9 @@ fi
 NOHEAP_IN_ACCEPT='\<(malloc|calloc|realloc|free|mmap)\s*\('
 
 HEAP_HITS=$(grep -nE "$NOHEAP_IN_ACCEPT" "$NATIVE_DIR/src/accepted.c" \
-  "$NATIVE_DIR/src/recv.c" "$NATIVE_DIR/src/send.c") || true
+  "$NATIVE_DIR/src/recv.c" "$NATIVE_DIR/src/send.c" "$NATIVE_DIR/src/connection.c") || true
 if [ -n "$HEAP_HITS" ]; then
-  echo "FAIL: heap-allocation call in accepted/recv/send production layer (see match above)" >&2
+  echo "FAIL: heap-allocation call in accepted/recv/send/connection production layer (see match above)" >&2
   echo "$HEAP_HITS" >&2
   FAIL=1
 fi
@@ -180,4 +182,4 @@ if [ "$FAIL" -ne 0 ]; then
   exit 1
 fi
 
-echo "OK: networking confined to listener/poller/accepted/recv/send production modules; send uses MSG_NOSIGNAL; no loop/scatter/generic-IO/thread/TLS calls; no heap calls in accepted.c, recv.c, or send.c"
+echo "OK: networking confined to listener/poller/accepted/recv/send/connection production modules; send uses MSG_NOSIGNAL; no loop/scatter/generic-IO/thread/TLS calls; no heap calls in accepted.c, recv.c, send.c, or connection.c"

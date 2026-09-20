@@ -137,3 +137,15 @@ target_link_libraries(test_send PRIVATE omni_send omni_accepted omni_listener om
 omni_apply_native_flags(test_send)
 add_test(NAME send-unit COMMAND test_send)
 set_tests_properties(send-unit PROPERTIES TIMEOUT 180)
+
+# Protocol-agnostic connection ownership tests (Task 019): explicit
+# accepted-FD transfer, READY/OPEN/CLOSING/CLOSED lifecycle, embedded
+# borrowed receive storage, delegated recv/send, poller metadata, FD-0,
+# peer failure, deterministic stress, and descriptor census. Loopback-only,
+# self-cleaning, no external network, and no production event loop.
+add_executable(test_connection test_connection.c)
+target_link_libraries(test_connection PRIVATE omni_connection omni_recv omni_send omni_accepted
+                                             omni_listener omni_poller omni_bytebuf)
+omni_apply_native_flags(test_connection)
+add_test(NAME connection-unit COMMAND test_connection)
+set_tests_properties(connection-unit PROPERTIES TIMEOUT 240)
