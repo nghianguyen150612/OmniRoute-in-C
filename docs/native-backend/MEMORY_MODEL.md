@@ -464,6 +464,28 @@ CLOSING` and is idempotent from `CLOSING`/`CLOSED`; destroy releases both
     hidden heap. Receive and send capacities are independent, fixed at `init`,
     and never changed. Protocols, parsers, timers, threads, and production
     startup wiring remain deferred.
+  - Bounded connection/session integration implemented (Task 026,
+    `native/src/connection_session.c`, `omni_connection_session_*`): the
+    session borrows one live `OPEN` `omni_connection` plus two caller-provided
+    fixed backing ranges for the future `connection_io` buffers and owns exactly
+    the `omni_connection_io` object (with its two borrowed bytebufs). It never
+    owns the descriptor, never destroys the accepted owner, never removes a
+    registry entry, never manages a poller registration, and never runs an
+    event loop. `init` records the borrowed connection and backing ranges and
+    moves `NEW -> INIT`; `open` calls `omni_connection_io_init` with the
+    stored `connection->accepted` owner and moves `INIT -> OPEN`; `close`
+    moves `OPEN -> CLOSING` via `io_close`; `destroy` destroys the owned io
+    and moves any state `-> CLOSED`. Readable/writable delegate once through
+    the owned io when `OPEN`. On the current 64-bit Linux ABI,
+    `struct omni_connection_session` is 160 bytes (8 borrowed connection
+    pointer + 112 io + 8/8 receive storage/capacity + 8/8 send storage/capacity
+    - 4 state + 4 pad) and the transient
+      `struct omni_connection_session_config` is 40 bytes. For `R` receive and
+      `S` send bytes, total per-session memory beyond the externally owned
+      connection is `160 + R + S` caller bytes plus the connection and io
+      objects already accounted for, with no per-read/write allocation, no queue,
+      and no hidden heap. Protocols, parsers, timers, threads, and production
+      startup wiring remain deferred.
 - Caches: global byte budget (e.g. single-digit MiB default on iOS, higher
   on Linux via config), per-cache caps, idle eviction; heavy caches
   (catalog, embeddings) releasable.

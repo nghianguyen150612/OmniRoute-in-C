@@ -45,7 +45,7 @@ no `-march=native`, no LTO.
 native/
   README.md                  # this file (build matrix, behavior, baseline)
   CMakeLists.txt             # Linux-first build described above
-  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h, reactor.h, connection_reactor.h, runtime.h, event_loop.h, connection_io.h
+  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h, reactor.h, connection_reactor.h, runtime.h, event_loop.h, connection_io.h, connection_session.h
   src/
     main.c                   # entry point, tiny CLI, lifecycle
     meminfo.c                # Linux /proc/self/status RSS hook (+ stub elsewhere)
@@ -63,6 +63,7 @@ native/
     runtime.c                # runtime lifecycle coordinator (Task 023)
     event_loop.c             # bounded synchronous runtime event loop (Task 024)
     connection_io.c          # bounded connection I/O state machine (Task 025)
+    connection_session.c     # bounded connection/session integration (Task 026)
   tests/
     CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
     check_network_boundary.sh  # review gate: socket setup confined to src/listener.c,
@@ -70,8 +71,10 @@ native/
                               # accepted-FD lifecycle to src/accepted.c, receive
                               # to src/recv.c, send to src/send.c, and
                               # connection/reactor binding to
-                              # src/connection_reactor.c, and event-loop
-                              # orchestration to src/event_loop.c; alternate
+                              # src/connection_reactor.c, event-loop
+                              # orchestration to src/event_loop.c, connection I/O to
+                              # src/connection_io.c, and session coordination to
+                              # src/connection_session.c; alternate
                               # loop backends, queues, IO/scatter/TLS are
                               # banned everywhere in production sources, with
                               # heap allocation banned in the bounded native
@@ -1056,6 +1059,118 @@ the same 23 cases. `npm run check:docs-all` passed its documentation gates
 with only the repository's pre-existing soft count/version/date drift
 warnings.
 
+## Bounded connection/session integration (Task 026)
+
+Task 026 connects the existing connection ownership model with the bounded
+connection I/O state machine without introducing protocol behavior
+(`include/omniroute/connection_session.h`, `src/connection_session.c`,
+and `tests/test_connection_session.c`):
+
+```text
+listener -> accepted -> connection (owns FD + receive buffer)
+                              |
+                              v
+                    connection_session (borrows connection,
+                              |         owns connection_io)
+                              v
+                    connection_io (owns receive/send bytebufs,
+                              |     borrows accepted FD)
+                              +-- receive buffer (borrowed backing)
+                              +-- send buffer (borrowed backing)
+                              +-- socket read/write via recv/send primitives
+```
+
+The public surface is `omni_connection_session_make_inert`,
+`omni_connection_session_init`, `omni_connection_session_open`,
+`omni_connection_session_close`, and
+`omni_connection_session_destroy`, with
+`omni_connection_session_state`, `omni_connection_session_is_open`,
+`omni_connection_session_is_closed`,
+`omni_connection_session_connection`,
+`omni_connection_session_io`, `omni_connection_session_io_state`,
+`omni_connection_session_receive_buffer`,
+`omni_connection_session_send_buffer`,
+`omni_connection_session_fd`,
+`omni_connection_session_readable`, and
+`omni_connection_session_writable`. `init` binds a live `OPEN`
+`omni_connection` and records two caller-provided fixed backing ranges for the
+future `connection_io` receive and send buffers; `open` then initializes the
+owned `connection_io` from those borrowed references. No heap allocation
+occurs at any session operation; the caller keeps the connection and both
+backing ranges alive until after `destroy`.
+
+**State machine**: the explicit states are `NEW`, `INIT`, `OPEN`, `CLOSING`,
+and `CLOSED`. `make_inert` canonicalizes fresh or `CLOSED` storage to `NEW`.
+`init` transitions `NEW -> INIT` and rejects every other source state, a
+non-`OPEN` connection, a non-live connection, or a NULL/zero-capacity buffer,
+leaving the session `NEW` on failure. `open` transitions `INIT -> OPEN` by
+calling `omni_connection_io_init` with the stored borrowed connection's
+`accepted` owner and the stored backing ranges; failure leaves the session in
+`INIT` with the `io` still `NEW` so the caller may retry or destroy. `close`
+moves `OPEN -> CLOSING` via `omni_connection_io_close` and is idempotent from
+`CLOSING` and `CLOSED` while being rejected from `NEW`/`INIT`. `destroy`
+releases the owned `connection_io` (both bytebufs) and reaches `CLOSED`; it
+is idempotent and safe on `NULL`, `NEW`, `INIT`, `OPEN`, `CLOSING`, and
+`CLOSED`. Closed sessions reject `readable`/`writable` with `ERR_CLOSED`, and
+`make_inert` is not a cleanup for `INIT`, `OPEN`, or `CLOSING` objects.
+
+**Integration**: the session stores only a borrowed `omni_connection *`,
+the owned `omni_connection_io`, and the four fixed buffer references plus
+state. It never closes a descriptor, never destroys an `omni_accepted` owner,
+never removes a registry entry, never manages a poller registration, and never
+runs an event loop. It initializes `connection_io` correctly with
+`connection->accepted` as the borrowed `accepted` owner, preserves connection
+ownership boundaries (the connection still owns the FD until its own destroy),
+exposes `connection_io` state and buffers through session views, and allows
+the caller to perform exactly one bounded `readable`/`writable` operation
+through the session boundary when `OPEN`. It does not read automatically,
+write automatically, retry, or loop.
+
+**Memory**: on the current 64-bit Linux ABI, `struct
+omni_connection_session` is 160 bytes (`struct omni_connection *` 8 +
+`struct omni_connection_io` 112 + `void *`+`size_t` receive 16 + `void *`+
+`size_t` send 16 + 4-byte state + 4 bytes padding) and the transient
+`struct omni_connection_session_config` is 40 bytes. The caller reserves the
+connection object plus its own receive buffer plus `R+S` backing bytes for the
+session I/O plus the session object itself. There is no per-read or
+per-write heap allocation, no dynamic container, no queue, and no hidden
+allocation. Receive and send capacities are independent, fixed at `init` for
+use at `open`, and never changed after `open`.
+
+**Error model**: `init`/`open`/`close` return an explicit
+`omni_connection_session_result` with `OK`, `ERR_INVALID` (NULL, bad
+connection, bad storage, zero capacity, non-OPEN connection), `ERR_STATE`
+(invalid lifecycle transition), and `ERR_CLOSED` (operation on closing/closed
+session). `readable`/`writable` return the underlying
+`omni_connection_io_result` so `WOULD_BLOCK`, `INTERRUPTED`, `BUFFER_FULL`,
+`EOF`, and `ERR_IO` remain explicit with preserved `errno`.
+
+**Protocol boundary**: HTTP, JSON, OpenAI API, routing, authentication, TLS,
+providers, SSE, WebSocket, MCP, and database remain deferred. The session
+only coordinates lifecycle and delegates data movement to the existing
+`connection_io`/`recv`/`send` primitives without interpreting protocol bytes.
+`omniroute-native` still links only its Task 011 CLI sources;
+`omni_connection_session` is linked only into `test_connection_session`.
+
+Task 026 validation covers inert object, valid init/open/close, invalid
+init (NULL, non-OPEN connection, zero/NULL buffers, duplicate init),
+invalid transitions (open from NEW, close from INIT, init from OPEN,
+readable/writable from NEW/INIT/CLOSING/CLOSED), connection and descriptor
+preservation after close/destroy, registry non-destruction, connection I/O
+initialization and distinct-buffer checks, readable/writable delegation with
+client-visible payload and EOF handling, bounded memory size check, 20 repeated
+lifecycle cycles, and bystander-FD survival. The focused session suite reports
+327 checks with zero failures in the current validation run.
+
+Final Task 026 validation detail: GCC Debug, GCC Release, Clang Debug, Clang
+Release, GCC ASan+UBSan Debug, and Clang ASan+UBSan Debug all built
+warning-clean. Each configuration passed all 24 CTest cases, covering the
+CLI, network-boundary gate, Tasks 012-025 regression suites, and
+`connection-session-unit`; the canonical `npm run test:native` Debug run
+passed the same 24 cases. `npm run check:docs-all` passed its documentation
+gates with only the repository's pre-existing soft count/version/date drift
+warnings.
+
 ## Initial baseline (Task 011, measured 2026-09-19)
 
 Environment: Linux 7.2.4-zen2 x86_64, 8 CPUs, 16 GiB RAM; GCC 16.2.1,
@@ -1154,7 +1269,8 @@ accepted-socket ownership with its bounded accept drain, receive with its
 bounded drain, the immutable-span send primitive with its bounded drain,
 the protocol-agnostic connection owner, the bounded connection registry, the
 connection/reactor lifecycle adapter, the runtime coordinator, the bounded
-synchronous event loop, and the bounded connection I/O state machine are
+synchronous event loop, the bounded connection I/O state machine, and the
+bounded connection/session integration are
 landed primitives now — see above.) Each
 remaining item gets its own reviewable task.
 // linguist refresh

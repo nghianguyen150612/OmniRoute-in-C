@@ -1,5 +1,5 @@
 #!/bin/sh
-# Task 025 network source-boundary gate: native networking exists, but ONLY
+# Task 026 network source-boundary gate: native networking exists, but ONLY
 # in the deliberate networking layer (src/listener.c owns socket lifecycle,
 # src/poller.c owns the readiness wait, src/accepted.c owns the accept4
 # drain plus accepted-descriptor lifecycle, src/recv.c owns nonblocking
@@ -17,6 +17,9 @@
 # src/connection_io.c owns bounded receive/send buffer interaction and
 # read/write readiness handling through the existing recv/send primitives
 # with no direct socket call, no protocol handling, and no heap allocation.
+# The connection/session layer in src/connection_session.c coordinates the
+# connection ownership model with the connection I/O lifecycle with no direct
+# socket call, no protocol handling, and no heap allocation.
 # Every other production module (arena, bytebuf, meminfo, main, all other
 # headers and sources) must stay socket-free, and the deferred layers — output
 # queues, generic payload read/write, DNS/client, threads, TLS, and protocols —
@@ -177,21 +180,22 @@ if [ -n "$SEND_FORBIDDEN_HITS" ]; then
 fi
 
 # 10. Zero-heap rule for the accept, receive, send, connection, registry,
-# connection/reactor adapter, runtime, event-loop, and connection I/O layers:
-# bounded acceptance, bounded drain, single receive, single send, both bounded
-# drains, lifecycle composition, membership bookkeeping, adapter binding,
-# runtime coordination, loop execution, and bounded I/O buffer interaction
+# connection/reactor adapter, runtime, event-loop, connection I/O, and
+# connection/session layers: bounded acceptance, bounded drain, single
+# receive, single send, both bounded drains, lifecycle composition,
+# membership bookkeeping, adapter binding, runtime coordination, loop
+# execution, bounded I/O buffer interaction, and session coordination
 # perform no heap allocation. Allocator tokens are banned outright (negative
-# control for the Task 016/017/018/019/020/022/025 contracts).
+# control for the Task 016/017/018/019/020/022/025/026 contracts).
 NOHEAP_IN_ACCEPT='\<(malloc|calloc|realloc|free|mmap)\s*\('
 
 HEAP_HITS=$(grep -nE "$NOHEAP_IN_ACCEPT" "$NATIVE_DIR/src/accepted.c" \
   "$NATIVE_DIR/src/recv.c" "$NATIVE_DIR/src/send.c" "$NATIVE_DIR/src/connection.c" \
   "$NATIVE_DIR/src/registry.c" "$NATIVE_DIR/src/connection_reactor.c" \
   "$NATIVE_DIR/src/runtime.c" "$NATIVE_DIR/src/event_loop.c" \
-  "$NATIVE_DIR/src/connection_io.c") || true
+  "$NATIVE_DIR/src/connection_io.c" "$NATIVE_DIR/src/connection_session.c") || true
 if [ -n "$HEAP_HITS" ]; then
-  echo "FAIL: heap-allocation call in accepted/recv/send/connection/registry/connection_reactor/runtime/event_loop/connection_io production layer (see match above)" >&2
+  echo "FAIL: heap-allocation call in accepted/recv/send/connection/registry/connection_reactor/runtime/event_loop/connection_io/connection_session production layer (see match above)" >&2
   echo "$HEAP_HITS" >&2
   FAIL=1
 fi
@@ -200,4 +204,4 @@ if [ "$FAIL" -ne 0 ]; then
   exit 1
 fi
 
-echo "OK: networking confined to listener/poller/accepted/recv/send/connection/registry/connection_reactor/connection_io production modules; runtime coordinates lifecycle; event_loop coordinates reactor execution; connection_io owns bounded buffer I/O through recv/send; send uses MSG_NOSIGNAL; no alternate-loop/scatter/generic-IO/thread/TLS calls; no heap calls in accepted.c, recv.c, send.c, connection.c, registry.c, connection_reactor.c, runtime.c, event_loop.c, or connection_io.c"
+echo "OK: networking confined to listener/poller/accepted/recv/send/connection/registry/connection_reactor/connection_io/connection_session production modules; runtime coordinates lifecycle; event_loop coordinates reactor execution; connection_io owns bounded buffer I/O through recv/send; connection_session coordinates connection+io lifecycle; send uses MSG_NOSIGNAL; no alternate-loop/scatter/generic-IO/thread/TLS calls; no heap calls in accepted.c, recv.c, send.c, connection.c, registry.c, connection_reactor.c, runtime.c, event_loop.c, connection_io.c, or connection_session.c"
