@@ -100,9 +100,10 @@ add_library(omni_connection STATIC
 add_library(omni_registry STATIC
   src/registry.c)
 
-# Bounded reactor/event-loop foundation connects poller to application callbacks.
-# It is linked only into the reactor tests: omniroute-native remains a
-# socket-free executable until a later server-runtime task deliberately wires it in.
+# Bounded reactor foundation connects poller to application callbacks. It is
+# linked only into the reactor and higher-layer native tests: omniroute-native
+# remains a socket-free executable until a later server-runtime task
+# deliberately wires it in.
 
 add_library(omni_reactor STATIC
   src/reactor.c)
@@ -118,6 +119,12 @@ add_library(omni_connection_reactor STATIC
 # still has no runtime loop or native server wiring.
 add_library(omni_runtime STATIC
   src/runtime.c)
+
+# The synchronous event loop consumes a running runtime and repeatedly calls
+# the existing bounded reactor step. It remains test-only; it adds no
+# production startup wiring, protocol behavior, or background execution.
+add_library(omni_event_loop STATIC
+  src/event_loop.c)
 
 add_executable(omniroute-native
   src/main.c
@@ -135,7 +142,11 @@ target_include_directories(omni_registry PUBLIC include)
 target_include_directories(omni_reactor PUBLIC include)
 target_include_directories(omni_connection_reactor PUBLIC include)
 target_include_directories(omni_runtime PUBLIC include)
+target_include_directories(omni_event_loop PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
+
+target_link_libraries(omni_event_loop PUBLIC omni_runtime omni_reactor omni_registry omni_poller
+                                              omni_listener)
 
 # Strong warning set for GCC and Clang; warnings are errors on every native
 # target. Kept to flags with stable cross-compiler behavior (no experimental
@@ -171,6 +182,7 @@ omni_apply_native_flags(omni_registry)
 omni_apply_native_flags(omni_reactor)
 omni_apply_native_flags(omni_connection_reactor)
 omni_apply_native_flags(omni_runtime)
+omni_apply_native_flags(omni_event_loop)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)

@@ -59,11 +59,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     PASS_REGEX "rss_kb: [0-9]+")
 endif()
 
-# Networking is confined to src/listener.c (Task 014): fail if socket/FD
-# calls appear anywhere else in production sources, or if deferred layers
-# (accept path, event loop, payload I/O, threads, TLS) appear anywhere at
-# all. Tests under tests/ are intentionally not scanned — the loopback
-# tests legitimately use client-side sockets.
+# Networking is confined to the deliberate native layers: fail if socket/FD
+# calls appear outside their owners, or if deferred layers (alternate event
+# loop backends, payload I/O, threads, TLS) appear anywhere at all. Tests under
+# tests/ are intentionally not scanned — the loopback tests legitimately use
+# client-side sockets.
 add_test(NAME network-source-boundary
   COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/check_network_boundary.sh"
     "${CMAKE_CURRENT_SOURCE_DIR}/..")
@@ -161,7 +161,7 @@ omni_apply_native_flags(test_registry)
 add_test(NAME registry-unit COMMAND test_registry)
 set_tests_properties(registry-unit PROPERTIES TIMEOUT 120)
 
-# Bounded reactor/event-loop foundation tests (Task 021): poller-reactor integration,
+# Bounded reactor foundation tests (Task 021): poller-reactor integration,
 # callback dispatch, token identity round-trip, capacity boundaries, duplicate
 # handling, interruption, and bounded step execution. Local pipe-only, self-cleaning,
 # no external network, no production payload transfer, no protocol handling.
@@ -189,7 +189,8 @@ set_tests_properties(connection-reactor-unit PROPERTIES TIMEOUT 180)
 # Native runtime coordinator tests (Task 023): explicit subsystem startup and
 # reverse shutdown ordering, late listener-failure cleanup, invalid lifecycle
 # transitions, caller-owned connection survival, and repeated bounded cycles.
-# There is no event loop, protocol handling, or production startup wiring.
+# The runtime remains a lifecycle-only dependency for the separate Task 024
+# event-loop tests.
 add_executable(test_runtime test_runtime.c)
 target_link_libraries(test_runtime PRIVATE omni_runtime omni_reactor omni_registry omni_poller
                                            omni_listener omni_connection omni_recv omni_send
@@ -197,3 +198,17 @@ target_link_libraries(test_runtime PRIVATE omni_runtime omni_reactor omni_regist
 omni_apply_native_flags(test_runtime)
 add_test(NAME runtime-unit COMMAND test_runtime)
 set_tests_properties(runtime-unit PROPERTIES TIMEOUT 240)
+
+# Native event-loop foundation tests (Task 024): runtime binding, empty-reactor
+# exit, finite timeout validation, synchronous readiness dispatch, callback
+# stop requests, interrupted waits, borrowed descriptor/connection survival,
+# repeated stop safety, and repeated init/run/destroy cycles. The loop owns no
+# protocol state and is not wired into production startup.
+add_executable(test_event_loop test_event_loop.c)
+target_link_libraries(test_event_loop PRIVATE omni_event_loop omni_runtime
+                                               omni_connection_reactor omni_reactor
+                                               omni_registry omni_connection omni_recv omni_send
+                                               omni_accepted omni_listener omni_poller omni_bytebuf)
+omni_apply_native_flags(test_event_loop)
+add_test(NAME event-loop-unit COMMAND test_event_loop)
+set_tests_properties(event-loop-unit PROPERTIES TIMEOUT 240)

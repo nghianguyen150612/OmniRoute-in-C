@@ -45,7 +45,7 @@ no `-march=native`, no LTO.
 native/
   README.md                  # this file (build matrix, behavior, baseline)
   CMakeLists.txt             # Linux-first build described above
-  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h, reactor.h, connection_reactor.h
+  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h, reactor.h, connection_reactor.h, runtime.h, event_loop.h
   src/
     main.c                   # entry point, tiny CLI, lifecycle
     meminfo.c                # Linux /proc/self/status RSS hook (+ stub elsewhere)
@@ -60,6 +60,8 @@ native/
     registry.c               # bounded connection registry (Task 020)
     reactor.c                # bounded poller-to-callback reactor (Task 021)
     connection_reactor.c     # connection lifecycle/reactor adapter (Task 022)
+    runtime.c                # runtime lifecycle coordinator (Task 023)
+    event_loop.c             # bounded synchronous runtime event loop (Task 024)
   tests/
     CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
     check_network_boundary.sh  # review gate: socket setup confined to src/listener.c,
@@ -67,8 +69,9 @@ native/
                               # accepted-FD lifecycle to src/accepted.c, receive
                               # to src/recv.c, send to src/send.c, and
                               # connection/reactor binding to
-                              # src/connection_reactor.c;
-                              # deferred layers (loop/queues/IO/scatter/TLS)
+                              # src/connection_reactor.c, and event-loop
+                              # orchestration to src/event_loop.c; alternate
+                              # loop backends, queues, IO/scatter/TLS are
                               # banned everywhere in production sources, with
                               # heap allocation banned in the bounded native
                               # networking/composition layers
@@ -209,12 +212,12 @@ SOCK_CLOEXEC`, verified after creation (fails closed); `SO_REUSEADDR`
   retries on the one-shot setup calls; ordinary bind conflicts fail
   without aborting, leaking nothing.
 - **Not this task**: no accept path, no connection objects, no payload
-  input/output, no event loop (epoll/poll/select), no HTTP, no threads,
+  input/output, no event-loop backend (epoll/select), no HTTP, no threads,
   no signal changes.
 - **Boundary gate**: `tests/check_network_boundary.sh` (CTest
   `network-source-boundary`) confines socket/FD tokens to
   `src/listener.c` — arena, bytebuf, meminfo, and main stay socket-free —
-  and bans accept/loop/IO/thread/TLS tokens in all production sources.
+  and bans alternate-loop/IO/thread/TLS tokens in all production sources.
 
 `main` never binds a listener (separate static lib linked only into
 `test_listener`), so the Task 011 baseline below still describes a
@@ -581,8 +584,8 @@ is test-only linked.
 
 ## Bounded reactor foundation (Task 021)
 
-The first bounded reactor/event-loop foundation connects the existing poller
-to explicit application callbacks (`include/omniroute/reactor.h`,
+The bounded reactor foundation connects the existing poller to explicit
+application callbacks (`include/omniroute/reactor.h`,
 `src/reactor.c`, and `tests/test_reactor.c`):
 
 ```
@@ -812,10 +815,10 @@ per-connection coordinator storage. These values describe the coordinator
 context and caller reservations, not a full server RSS budget.
 
 The coordinator is deliberately not wired into `omniroute-native` startup:
-`omni_runtime` is linked only into `runtime-unit`, so the existing production
-binary remains the short-lived, socket-free Task 011 skeleton. A future task
-may explicitly call the existing bounded reactor step and accept/connection
-primitives; Task 023 does not implement that loop or any protocol handling.
+`omni_runtime` is linked only into the native test libraries, so the existing
+production binary remains the short-lived, socket-free Task 011 skeleton.
+Task 024 consumes a running coordinator from a separate event-loop object; it
+does not change the production startup path or add protocol handling.
 
 Task 023 validation covers inert construction, successful initialization and
 state transitions, invalid reinitialization and stop/start transitions,
@@ -832,6 +835,93 @@ network-boundary gate, Tasks 012-022 regression suites, and `runtime-unit`.
 The GCC Release production executable remains 4,767 bytes in `size` output,
 and `nm` shows no runtime, listener, registry, reactor, poller, or connection
 symbols linked into `omniroute-native`; the coordinator remains test-only.
+
+## Native event loop foundation (Task 024)
+
+Task 024 turns the Task 023 lifecycle coordinator into a bounded synchronous
+execution engine without adding an application protocol
+(`include/omniroute/event_loop.h`, `src/event_loop.c`, and
+`tests/test_event_loop.c`):
+
+```text
+omni_runtime (RUNNING)
+        |
+        v
+omni_event_loop_run()
+        |
+        +-- omni_reactor_step(timeout_ms)
+        |       |
+        |       +-- synchronous callbacks
+        |       `-- caller-owned connections
+        `-- repeat until stop, failure, interruption, or empty reactor
+```
+
+The public surface is `omni_event_loop_make_inert`, `omni_event_loop_init`,
+`omni_event_loop_run`, `omni_event_loop_stop`, `omni_event_loop_destroy`, and
+`omni_event_loop_state`, with fixed accounting views for iterations, processed
+events, and the last reactor status. Initialization borrows an initialized
+runtime and validates a finite step timeout; it does not start the runtime.
+`run` requires `omni_runtime_start` to have completed, and runtime teardown is
+still performed by the runtime owner after the loop returns.
+
+**Execution model**: the loop is synchronous and single-owner. Each loop
+iteration calls exactly one existing `omni_reactor_step`; the reactor retains
+responsibility for readiness waits, event storage, callback ordering, and
+callback invocation. The event loop does not duplicate listener, registry,
+poller, reactor, or connection logic. A callback may call `stop`, which marks
+the loop `STOPPING`; the current reactor dispatch completes and the loop exits
+without starting another step. Because this foundation has no wakeup
+descriptor, thread, or signal integration, another owner cannot interrupt a
+blocked wait asynchronously. Callback failures are not a separate result yet:
+the existing callback type returns `void`, so reactor failures and interrupted
+waits are the only step failures surfaced here.
+
+**Lifecycle and shutdown**: `INERT` and `STOPPED` storage can be initialized;
+`INITIALIZED` rejects stop-before-run explicitly; `RUNNING` accepts one stop
+request; and repeated stop calls in `STOPPING` or `STOPPED` are safe. A normal
+stop, an empty-reactor exit, a reactor failure, or an interrupted wait always
+returns from `run` without a shutdown wait. The event loop never calls
+`omni_runtime_stop`, destroys a connection, removes a registration, or closes
+a descriptor. `destroy` only clears the loop's borrowed runtime reference
+after execution has returned.
+
+**Timeouts**: `OMNI_EVENT_LOOP_DEFAULT_TIMEOUT_MS` is 1,000 ms and
+`OMNI_EVENT_LOOP_MAX_TIMEOUT_MS` is 60,000 ms. Zero is a nonblocking probe;
+negative values and values above the maximum are rejected before execution.
+Every positive value bounds one reactor wait. An empty reactor has no kernel
+wait source in the existing reactor, so the loop performs one zero-event step
+and exits cleanly instead of busy-spinning forever.
+
+**Memory and counters**: the event-loop object is caller-owned and has no
+backing arrays; on the current 64-bit Linux ABI it is 48 bytes, while the
+configuration view is 16 bytes. Initialization, stepping, stop, and destroy
+perform no heap allocation. The loop reuses the reactor's existing fixed
+registration and event storage, creates no queues, and retains no events.
+`iterations` increments once per attempted reactor step and
+`events_processed` adds the step's callback count. Both are fixed `uint64_t`
+counters that saturate at `UINT64_MAX` rather than wrapping.
+
+**Protocol boundary**: HTTP, parsing, routing, authentication, providers,
+TLS, database access, JSON, SSE, WebSocket, timers, background jobs, and
+worker threads remain deferred. The event loop only supplies execution
+orchestration for the already-landed runtime/reactor/callback contracts.
+`omniroute-native` still links only its Task 011 CLI sources; this foundation
+is test-only until a later task explicitly wires a production startup path.
+
+Task 024 validation covers valid and invalid initialization, runtime-state
+gating, empty-reactor execution, zero/default/maximum timeout validation,
+readiness dispatch, callback-driven stop, repeated stop, interrupted-wait
+propagation, descriptor and connection ownership survival, and 1,000 repeated
+init/run/stop/destroy cycles. The focused event-loop suite reports 52 checks
+with zero failures in the current validation run.
+
+Final Task 024 validation detail: GCC Debug, GCC Release, Clang Debug, Clang
+Release, GCC ASan+UBSan Debug, and Clang ASan+UBSan Debug all built
+warning-clean. Each configuration passed all 22 CTest cases, covering the
+CLI, network-boundary gate, Tasks 012-023 regression suites, and
+`event-loop-unit`; the canonical `npm run test:native` Debug run passed the
+same 22 cases. `npm run check:docs-all` passed its documentation gates with
+only the repository's pre-existing soft count/version/date drift warnings.
 
 ## Initial baseline (Task 011, measured 2026-09-19)
 
@@ -922,7 +1012,7 @@ from the migration design happens when iOS work starts.
 
 ## Intentionally deferred
 
-Event loop (epoll/io_uring/threads), production connection dispatcher,
+Alternate event-loop backends (epoll/io_uring), production connection dispatcher,
 output queues and connection write state, HTTP, `/health`, `/v1/models`, TLS, SQLite, crypto,
 auth, providers, routing, streaming, compression, MCP, A2A,
 Objective-C/Swift/assembly.

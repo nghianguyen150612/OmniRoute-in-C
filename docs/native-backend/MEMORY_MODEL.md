@@ -423,8 +423,26 @@ omni_poller_event))`, in addition to the existing subsystem objects. No
     initialization unwinds only completed steps. Runtime teardown never
     destroys external connections or frees caller arrays; it closes only the
     listener descriptor that the listener primitive initialized for this
-    runtime. There is still no event loop, HTTP, parser, protocol, auth,
-    provider, TLS, database, thread, or background-worker state.
+    runtime. The coordinator still has no event-loop execution, HTTP, parser,
+    protocol, auth, provider, TLS, database, thread, or background-worker
+    state; Task 024 consumes this coordinator through a separate loop object.
+  - Native bounded synchronous event loop implemented (Task 024,
+    `native/src/event_loop.c`, `omni_event_loop_*`): the loop borrows an
+    initialized/running `omni_runtime`, validates one finite timeout, and
+    performs exactly one existing `omni_reactor_step` per iteration. The
+    current default timeout is 1,000 ms and the event-loop maximum is 60,000
+    ms; zero remains a nonblocking probe. A callback can request STOPPING,
+    which is observed after the current reactor dispatch; an empty reactor
+    performs one zero-event step and exits rather than spinning because the
+    current reactor has no wakeup source. Reactor failures and interrupted
+    waits return explicit loop statuses; the loop never retries an interrupted
+    wait, stops the runtime, closes a descriptor, removes a registration, or
+    destroys a connection. On the current 64-bit ABI, `struct
+omni_event_loop` is 48 bytes and its configuration view is 16 bytes. It
+    has no backing arrays or heap path: it reuses the reactor's fixed event
+    storage, stores no queue, and keeps only saturating `uint64_t` iteration
+    and processed-event counters. Protocols, timers, signals, threads, and
+    production startup wiring remain deferred.
 - Caches: global byte budget (e.g. single-digit MiB default on iOS, higher
   on Linux via config), per-cache caps, idle eviction; heavy caches
   (catalog, embeddings) releasable.

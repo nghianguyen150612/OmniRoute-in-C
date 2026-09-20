@@ -8,9 +8,9 @@
  *
  * It owns lifecycle ordering and records which subsystem initializers have
  * completed. It does not own protocol state, application callbacks, provider
- * state, HTTP state, or any connection object. It also does not run a wait or
- * accept loop; a future runtime task will call the existing bounded reactor
- * step explicitly.
+ * state, HTTP state, or any connection object. The separate event-loop layer
+ * calls the existing bounded reactor step explicitly after runtime_start;
+ * this coordinator itself still does not run a wait or accept loop.
  *
  * The runtime object, listener, registry, reactor, and every backing array
  * are caller-owned storage. The coordinator borrows those objects for the
