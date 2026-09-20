@@ -127,3 +127,13 @@ target_link_libraries(test_recv PRIVATE omni_recv omni_accepted omni_listener om
 omni_apply_native_flags(test_recv)
 add_test(NAME recv-unit COMMAND test_recv)
 set_tests_properties(recv-unit PROPERTIES TIMEOUT 120)
+
+# Bounded nonblocking socket send tests (Task 018): immutable binary spans,
+# partial progress, bounded drain, backpressure, SIGPIPE-safe peer failure,
+# poller WRITE integration, stress, and descriptor census. Loopback-only,
+# self-cleaning, no external network, and no production server loop.
+add_executable(test_send test_send.c)
+target_link_libraries(test_send PRIVATE omni_send omni_accepted omni_listener omni_poller)
+omni_apply_native_flags(test_send)
+add_test(NAME send-unit COMMAND test_send)
+set_tests_properties(send-unit PROPERTIES TIMEOUT 180)

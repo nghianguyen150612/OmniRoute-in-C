@@ -1,16 +1,18 @@
 #!/bin/sh
-# Task 017 network source-boundary gate: native networking exists, but ONLY
+# Task 018 network source-boundary gate: native networking exists, but ONLY
 # in the deliberate networking layer (src/listener.c owns socket lifecycle,
 # src/poller.c owns the readiness wait, src/accepted.c owns the accept4
 # drain plus accepted-descriptor lifecycle, src/recv.c owns nonblocking
-# socket receive into byte buffers). Every other production module (arena,
-# bytebuf, meminfo, main, all other headers and sources) must stay
-# socket-free, and the deferred layers — event loop, socket payload send,
-# generic payload read/write, DNS/client, threads, TLS — stay banned from
-# ALL production sources, including the networking layer itself. The accept
-# path is confined to src/accepted.c and the receive path to src/recv.c
-# exactly as the readiness wait is confined to src/poller.c. Later tasks
-# extend this gate explicitly; they never loosen it silently.
+# socket receive into byte buffers, and src/send.c owns nonblocking socket
+# send with its required per-call SIGPIPE guard). Every other production
+# module (arena, bytebuf, meminfo, main, all other headers and sources) must stay
+# socket-free, and the deferred layers — event loop, output queues, generic
+# payload read/write, DNS/client, threads, TLS — stay banned from
+# ALL production sources, including the networking layer itself except for
+# the one authorized send call in src/send.c. The accept path is confined to
+# src/accepted.c, the receive path to src/recv.c, and the send path to
+# src/send.c exactly as the readiness wait is confined to src/poller.c. Later
+# tasks extend this gate explicitly; they never loosen it silently.
 #
 # Tests under tests/ are intentionally NOT scanned: the loopback tests
 # legitimately use client-side sockets and controlled test-client sends.
@@ -91,7 +93,26 @@ if [ -n "$RECV_LEAKS" ]; then
   FAIL=1
 fi
 
-# 6. Receive-mode flags: accepted descriptors are already nonblocking, so
+# 6. Send-path token: allowed ONLY in src/send.c. Plain send() is the
+# production output primitive; sendmsg/writev and every other scatter/gather
+# or generic output family remains forbidden below.
+SEND_ONLY='\<send\s*\('
+
+SEND_LEAKS=$(grep -rEn --include='*.c' --include='*.h' "$SEND_ONLY" \
+  "$NATIVE_DIR/src" "$NATIVE_DIR/include" | grep -v '/src/send\.c:') || true
+if [ -n "$SEND_LEAKS" ]; then
+  echo "FAIL: send-path call outside src/send.c (see match above)" >&2
+  echo "$SEND_LEAKS" >&2
+  FAIL=1
+fi
+
+SEND_CALLS=$(grep -Ec "$SEND_ONLY" "$NATIVE_DIR/src/send.c") || true
+if [ "$SEND_CALLS" -ne 1 ]; then
+  echo "FAIL: src/send.c must contain exactly one production send() call" >&2
+  FAIL=1
+fi
+
+# 7. Receive-mode flags: accepted descriptors are already nonblocking, so
 # production receive must remain an ordinary recv(fd, ptr, len, 0). Peeking,
 # wait-all semantics, and per-call nonblocking overrides are forbidden. This
 # is a token-level negative control in addition to the call-family checks.
@@ -105,13 +126,22 @@ if [ -n "$FLAG_HITS" ]; then
   FAIL=1
 fi
 
-# 7. Deferred layers: banned in every production source, including
+# 8. Send signal safety: the authorized production call must carry the
+# Linux-first MSG_NOSIGNAL mechanism. This is intentionally structural rather
+# than a claim that shell matching replaces source review; the peer-close test
+# below supplies the runtime survival proof.
+if ! grep -Eq 'send[[:space:]]*\([^;]*MSG_NOSIGNAL' "$NATIVE_DIR/src/send.c"; then
+  echo "FAIL: src/send.c does not visibly pass MSG_NOSIGNAL to send()" >&2
+  FAIL=1
+fi
+
+# 9. Deferred layers: banned in every production source, including
 # src/listener.c, src/poller.c, src/accepted.c, and src/recv.c. Task 017
-# owns receive only — no event loop (epoll/select/io_uring/kqueue), no
-# payload send (send/sendmsg), no generic payload read/write/shutdown, no
+# owns receive only and Task 018 owns one plain send — no event loop
+# (epoll/select/io_uring/kqueue), no sendmsg, no generic payload read/write/shutdown, no
 # scatter/gather or datagram receive variants (recvmsg/recvfrom), no
 # DNS/client resolution, no threads, no TLS.
-BANNED_EVERYWHERE='\<(connect|epoll_\w*|kqueue|kevent|io_uring|select|sendmsg|recvmsg|sendto|recvfrom|shutdown|send|read|write|getaddrinfo|getnameinfo|pthread_\w*|SSL_\w*|TLS_\w*|mbedtls_\w*)\s*\('
+BANNED_EVERYWHERE='\<(connect|epoll_\w*|kqueue|kevent|io_uring|select|sendmsg|recvmsg|sendto|recvfrom|shutdown|read|write|getaddrinfo|getnameinfo|pthread_\w*|SSL_\w*|TLS_\w*|mbedtls_\w*)\s*\('
 
 HITS=$(grep -rEn --include='*.c' --include='*.h' "$BANNED_EVERYWHERE" \
   "$NATIVE_DIR/src" "$NATIVE_DIR/include") || true
@@ -121,15 +151,27 @@ if [ -n "$HITS" ]; then
   FAIL=1
 fi
 
-# 8. Zero-heap rule for the accept and receive layers: bounded acceptance,
+# Even in the authorized send module, scatter/gather and generic output
+# calls remain forbidden. The global check above covers every other module.
+SEND_FORBIDDEN='\<(sendmsg|writev|write|shutdown)\s*\('
+SEND_FORBIDDEN_HITS=$(grep -nE "$SEND_FORBIDDEN" "$NATIVE_DIR/src/send.c") || true
+if [ -n "$SEND_FORBIDDEN_HITS" ]; then
+  echo "FAIL: forbidden generic/scatter output in src/send.c (see match above)" >&2
+  echo "$SEND_FORBIDDEN_HITS" >&2
+  FAIL=1
+fi
+
+# 10. Zero-heap rule for the accept, receive, and send layers: bounded
+# acceptance, bounded drain, single receive, single send, and both bounded
 # bounded drain, single receive, and bounded receive drain perform no heap
-# allocation, so allocator tokens are banned in src/accepted.c and
-# src/recv.c outright (negative control for the Task 016/017 contracts).
+# allocation, so allocator tokens are banned outright (negative control for
+# the Task 016/017/018 contracts).
 NOHEAP_IN_ACCEPT='\<(malloc|calloc|realloc|free|mmap)\s*\('
 
-HEAP_HITS=$(grep -nE "$NOHEAP_IN_ACCEPT" "$NATIVE_DIR/src/accepted.c" "$NATIVE_DIR/src/recv.c") || true
+HEAP_HITS=$(grep -nE "$NOHEAP_IN_ACCEPT" "$NATIVE_DIR/src/accepted.c" \
+  "$NATIVE_DIR/src/recv.c" "$NATIVE_DIR/src/send.c") || true
 if [ -n "$HEAP_HITS" ]; then
-  echo "FAIL: heap-allocation call in src/accepted.c or src/recv.c (see match above)" >&2
+  echo "FAIL: heap-allocation call in accepted/recv/send production layer (see match above)" >&2
   echo "$HEAP_HITS" >&2
   FAIL=1
 fi
@@ -138,4 +180,4 @@ if [ "$FAIL" -ne 0 ]; then
   exit 1
 fi
 
-echo "OK: networking confined to src/listener.c + src/poller.c + src/accepted.c + src/recv.c; accept path confined to src/accepted.c; receive path confined to src/recv.c; no loop/send/IO/thread/TLS calls; no heap calls in src/accepted.c or src/recv.c"
+echo "OK: networking confined to listener/poller/accepted/recv/send production modules; send uses MSG_NOSIGNAL; no loop/scatter/generic-IO/thread/TLS calls; no heap calls in accepted.c, recv.c, or send.c"

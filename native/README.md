@@ -45,7 +45,7 @@ no `-march=native`, no LTO.
 native/
   README.md                  # this file (build matrix, behavior, baseline)
   CMakeLists.txt             # Linux-first build described above
-  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h
+  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h
   src/
     main.c                   # entry point, tiny CLI, lifecycle
     meminfo.c                # Linux /proc/self/status RSS hook (+ stub elsewhere)
@@ -55,15 +55,16 @@ native/
     poller.c                 # bounded readiness wait (Task 015)
     accepted.c               # accepted-socket owner + bounded accept4 drain (Task 016)
     recv.c                   # bounded nonblocking recv into bytebuf (Task 017)
+    send.c                   # bounded nonblocking send from immutable span (Task 018)
   tests/
     CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
     check_network_boundary.sh  # review gate: socket setup confined to src/listener.c,
                               # readiness wait to src/poller.c, accept path plus
                               # accepted-FD lifecycle to src/accepted.c, receive
-                              # to src/recv.c; deferred layers (loop/send/IO/
-                              # threads/TLS) banned everywhere in production
-                              # sources, heap allocation banned in accepted.c
-                              # and recv.c
+                              # to src/recv.c, and send to src/send.c;
+                              # deferred layers (loop/queues/IO/scatter/TLS)
+                              # banned everywhere in production sources, heap
+                              # allocation banned in accepted.c, recv.c, send.c
 ```
 
 `compat/` holds the TypeScript harness stages (Tasks 006–010); the C
@@ -347,16 +348,89 @@ the poller.
   `BUFFER_FULL`. Hard capacity, reclaimable-prefix behavior, partial receive,
   and pending-data preservation are therefore observable and deterministic.
 - **Payload boundary**: bytes are opaque and binary-safe; no NUL termination,
-  HTTP parsing, framing, or encoding assumptions exist. Production has no
-  send/write path, no server loop, no threads, and no protocol behavior.
+  HTTP parsing, framing, or encoding assumptions exist. The receive layer
+  adds no send/write path of its own, no server loop, no threads, and no
+  protocol behavior.
 - **Boundary gate**: `check_network_boundary.sh` confines plain `recv()` to
   `src/recv.c`, rejects forbidden receive flags (`MSG_PEEK`, `MSG_WAITALL`,
-  `MSG_DONTWAIT`), keeps send/read/write/HTTP and later transport layers
-  banned, and bans heap calls in both `src/accepted.c` and `src/recv.c`.
+  `MSG_DONTWAIT`), keeps generic read/write, scatter/gather, HTTP, and later
+  transport layers banned, and bans heap calls in `src/accepted.c`,
+  `src/recv.c`, and `src/send.c`.
 
 `main` does not link or call `omni_recv` (the receive library is linked only
 into `test_recv`), so the Task 011 executable baseline remains unaffected by
 receive runtime activity.
+
+## Bounded socket send (Task 018)
+
+Allocation-free output from one accepted nonblocking socket through an
+immutable caller-owned byte span (`include/omniroute/send.h`,
+`src/send.c`, unit-tested by `tests/test_send.c` — 382 checks via CTest
+`send-unit`, loopback-only, self-cleaning). The send layer borrows the
+`omni_accepted` owner and the source span: the owner retains sole FD
+ownership, the caller retains payload ownership, and the synchronous call
+retains no pointer, length, offset, or queue state after returning.
+
+- **One-shot API**: `omni_send_once` performs zero syscalls for invalid input
+  and zero-length input, and at most one nonblocking socket `send()` for a
+  nonzero span. It uses the Linux-first `MSG_NOSIGNAL` per-call flag; no
+  process-wide SIGPIPE disposition is installed. The accepted FD is already
+  `O_NONBLOCK`, so the send layer never calls `fcntl`, changes flags, or
+  waits internally.
+- **Immutable binary span**: the minimal `{ const void *data, size_t length }`
+  span needs no NUL terminator and accepts embedded zero and non-ASCII bytes.
+  A NULL data pointer is valid only with zero length. The caller advances its
+  own logical offset after a partial positive result; the primitive never
+  retains the unsent tail.
+- **Safe result model**: `PROGRESS` carries the exact positive byte count;
+  `COMPLETE` represents a zero-length no-op or a fully completed drain;
+  `WOULD_BLOCK` carries `EAGAIN`/`EWOULDBLOCK`; `INTERRUPTED` carries `EINTR`
+  with no retry; `PEER_CLOSED` distinguishes `EPIPE`/`ECONNRESET`; and
+  `ERR_FATAL` preserves other socket errno values without closing the FD.
+  A nonzero request with a zero syscall return is an explicit internal
+  zero-progress result, never success. Invalid input is rejected before any
+  syscall.
+- **Size boundary**: each syscall request is capped at `SSIZE_MAX`. A
+  positive `ssize_t` return is checked against that bounded request before
+  conversion to `size_t`; no unchecked signed/unsigned narrowing is used.
+- **Bounded drain**: `omni_send_drain` advances through the span with local
+  byte-pointer arithmetic only and performs no more than finite
+  `max_calls` one-shot attempts. It completes without an extra probe call,
+  returns `LIMIT_REACHED` when the budget ends with bytes remaining, and
+  preserves every byte sent before `WOULD_BLOCK`, `INTERRUPTED`, peer/fatal
+  failure, or the limit. A zero call limit is invalid.
+- **Composition boundary**: the send layer never updates the poller,
+  creates an output queue or output byte buffer, performs shutdown, formats
+  HTTP, starts a server loop, or allocates heap storage. The production
+  executable remains unchanged; `omni_send` is linked only into
+  `test_send`.
+- **Integration proof**: tests register the accepted FD for WRITE through the
+  borrowed-only poller, observe readiness, send exact binary bytes, verify
+  them on the controlled client, and remove the registration explicitly.
+  Additional bounded tests force partial sends and WOULD_BLOCK with a
+  test-only socket-buffer limit, prove exact offset resumption, isolate
+  peer-close SIGPIPE survival in a child, exercise deterministic stream and
+  lifecycle stress, preserve a bystander FD, and compare a `/proc/self/fd`
+  census.
+- **Boundary gate**: `check_network_boundary.sh` authorizes plain `send()`
+  only in `src/send.c` and requires visible `MSG_NOSIGNAL`; it continues to
+  reject generic socket `read()`/`write()`, scatter/gather, datagram I/O,
+  shutdown, DNS, threads, TLS, event-loop backends, and heap calls in the
+  accepted/receive/send production layers.
+
+`main` does not link or call `omni_send` (the send library is linked only into
+`test_send`), so the Task 011 executable baseline remains unaffected by send
+runtime activity.
+
+Task 018 validation record (2026-09-20): the focused `send-unit` test passed
+382 checks; full CTest passed all 16 tests in each GCC Debug, GCC Release,
+Clang Debug, Clang Release, GCC ASan+UBSan Debug, and Clang ASan+UBSan Debug
+build. `sh native/tests/check_network_boundary.sh native` passed, and the
+Release executable remained at 16,640 bytes (`size` dec 4,767) with the
+send/receive layers absent from its `nm` symbol set. The three measured
+`--meminfo` runs reported RSS/HWM pairs of 1,744/1,744, 1,752/1,752, and
+1,748/1,748 kB; these are one-shot process measurements, not send-runtime
+memory accounting.
 
 ## Initial baseline (Task 011, measured 2026-09-19)
 
@@ -410,6 +484,13 @@ readiness, or recv symbols in `omniroute-native`; the receive layer lives in
 a separate static lib linked only into `test_recv`, and `main` receives
 nothing).
 
+Task 018 regression: unchanged — 16,640 bytes, `size` dec 4,767, and
+one-shot `--meminfo` samples of 1,744–1,752 kB for both RSS and peak HWM
+(`nm` confirms no send, receive, accepted, poller, listener, socket, bind,
+readiness, or payload-I/O symbols in `omniroute-native`; the send layer lives
+in a separate static lib linked only into `test_send`, and `main` sends
+nothing).
+
 ## Platform boundary
 
 Linux x86_64/arm64 is the build target; the `/proc` reader is the only
@@ -420,10 +501,12 @@ from the migration design happens when iOS work starts.
 
 ## Intentionally deferred
 
-Event loop (epoll/io_uring/threads), connection objects, socket payload
-output, HTTP, `/health`, `/v1/models`, TLS, SQLite, crypto, auth, providers,
-routing, streaming, compression, MCP, A2A, Objective-C/Swift/assembly.
+Event loop (epoll/io_uring/threads), connection objects, output queues and
+connection write state, HTTP, `/health`, `/v1/models`, TLS, SQLite, crypto,
+auth, providers, routing, streaming, compression, MCP, A2A,
+Objective-C/Swift/assembly.
 (Arenas, byte buffers, listener lifecycle, readiness observation,
-accepted-socket ownership with its bounded accept drain, and receive with its
-bounded drain are landed primitives now — see above.) Each
+accepted-socket ownership with its bounded accept drain, receive with its
+bounded drain, and the immutable-span send primitive with its bounded drain
+are landed primitives now — see above.) Each
 remaining item gets its own reviewable task.

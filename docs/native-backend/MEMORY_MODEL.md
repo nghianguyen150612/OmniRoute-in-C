@@ -338,6 +338,14 @@ recovery RSS: …  VmHWM: …  Threads: …  FDs: …
     `recv()` writes directly into the writable tail and commits the exact
     positive count; bounded drain, EOF, would-block, buffer-full, and fatal
     receive outcomes remain explicit. HTTP/parser wiring is still later.
+  - Send primitive implemented (Task 018, `native/src/send.c`,
+    `omni_send_*`): one nonblocking `send()` from an immutable caller-owned
+    span with Linux per-call MSG_NOSIGNAL, no payload copy, no retained
+    pointer or offset, and no heap allocation. Partial progress,
+    would-block, interruption, peer/fatal failure, SSIZE_MAX request
+    bounding, zero-length no-op, and bounded-drain LIMIT_REACHED outcomes
+    remain explicit. There is still no output queue, output byte buffer,
+    response state, or HTTP wiring.
 - Caches: global byte budget (e.g. single-digit MiB default on iOS, higher
   on Linux via config), per-cache caps, idle eviction; heavy caches
   (catalog, embeddings) releasable.
