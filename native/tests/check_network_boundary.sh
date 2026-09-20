@@ -7,7 +7,9 @@
 # with its required per-call SIGPIPE guard, src/connection.c owns the
 # higher-level transfer/lifecycle composition without direct socket calls,
 # and src/registry.c owns borrowed-pointer membership bookkeeping with no
-# socket, readiness, payload, timer, thread, or HTTP machinery at all.
+# socket, readiness, payload, timer, thread, or HTTP machinery at all. The
+# connection/reactor adapter in src/connection_reactor.c only composes those
+# contracts and performs no direct descriptor or payload operation.
 # Every other production module (arena, bytebuf, meminfo, main, all other
 # headers and sources) must stay socket-free, and the deferred layers — event
 # loop, output queues, generic payload read/write, DNS/client, threads, TLS —
@@ -15,7 +17,8 @@
 # itself except for the one authorized send call in src/send.c. The accept
 # path is confined to src/accepted.c, the receive path to src/recv.c, the
 # send path to src/send.c, connection composition to src/connection.c, and
-# membership bookkeeping to src/registry.c,
+# membership bookkeeping to src/registry.c, and connection/reactor binding to
+# src/connection_reactor.c,
 # exactly as the readiness wait is confined to src/poller.c. Later tasks
 # extend this gate explicitly; they never loosen it silently.
 #
@@ -166,18 +169,19 @@ if [ -n "$SEND_FORBIDDEN_HITS" ]; then
   FAIL=1
 fi
 
-# 10. Zero-heap rule for the accept, receive, send, connection, and
-# registry layers: bounded acceptance, bounded drain, single receive,
-# single send, both bounded drains, lifecycle composition, and membership
-# bookkeeping perform no heap allocation, so allocator tokens are banned
-# outright (negative control for the Task 016/017/018/019/020 contracts).
+# 10. Zero-heap rule for the accept, receive, send, connection, registry, and
+# connection/reactor adapter layers: bounded acceptance, bounded drain,
+# single receive, single send, both bounded drains, lifecycle composition,
+# membership bookkeeping, and adapter binding perform no heap allocation.
+# Allocator tokens are banned outright (negative control for the
+# Task 016/017/018/019/020/022 contracts).
 NOHEAP_IN_ACCEPT='\<(malloc|calloc|realloc|free|mmap)\s*\('
 
 HEAP_HITS=$(grep -nE "$NOHEAP_IN_ACCEPT" "$NATIVE_DIR/src/accepted.c" \
   "$NATIVE_DIR/src/recv.c" "$NATIVE_DIR/src/send.c" "$NATIVE_DIR/src/connection.c" \
-  "$NATIVE_DIR/src/registry.c") || true
+  "$NATIVE_DIR/src/registry.c" "$NATIVE_DIR/src/connection_reactor.c") || true
 if [ -n "$HEAP_HITS" ]; then
-  echo "FAIL: heap-allocation call in accepted/recv/send/connection/registry production layer (see match above)" >&2
+  echo "FAIL: heap-allocation call in accepted/recv/send/connection/registry/connection_reactor production layer (see match above)" >&2
   echo "$HEAP_HITS" >&2
   FAIL=1
 fi
@@ -186,4 +190,4 @@ if [ "$FAIL" -ne 0 ]; then
   exit 1
 fi
 
-echo "OK: networking confined to listener/poller/accepted/recv/send/connection/registry production modules; send uses MSG_NOSIGNAL; no loop/scatter/generic-IO/thread/TLS calls; no heap calls in accepted.c, recv.c, send.c, connection.c, or registry.c"
+echo "OK: networking confined to listener/poller/accepted/recv/send/connection/registry/connection_reactor production modules; send uses MSG_NOSIGNAL; no loop/scatter/generic-IO/thread/TLS calls; no heap calls in accepted.c, recv.c, send.c, connection.c, registry.c, or connection_reactor.c"

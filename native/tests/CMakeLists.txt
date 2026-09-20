@@ -170,3 +170,18 @@ target_link_libraries(test_reactor PRIVATE omni_reactor omni_poller)
 omni_apply_native_flags(test_reactor)
 add_test(NAME reactor-unit COMMAND test_reactor)
 set_tests_properties(reactor-unit PROPERTIES TIMEOUT 120)
+
+# Connection/reactor lifecycle adapter tests (Task 022): fixed registry
+# membership plus reactor registration, generation/index token invalidation,
+# synchronous readable/writable/error callback forwarding, removal during a
+# bounded dispatch step, reactor-failure rollback, destruction ordering, and
+# repeated attach/detach. No protocol handling, payload I/O, or production
+# startup wiring is involved.
+add_executable(test_connection_reactor test_connection_reactor.c)
+target_link_libraries(test_connection_reactor PRIVATE omni_connection_reactor omni_reactor
+                                                       omni_registry omni_connection omni_recv
+                                                       omni_send omni_accepted omni_listener omni_poller
+                                                       omni_bytebuf)
+omni_apply_native_flags(test_connection_reactor)
+add_test(NAME connection-reactor-unit COMMAND test_connection_reactor)
+set_tests_properties(connection-reactor-unit PROPERTIES TIMEOUT 180)

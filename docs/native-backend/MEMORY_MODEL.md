@@ -383,6 +383,27 @@ recovery RSS: …  VmHWM: …  Threads: …  FDs: …
     background loop. Descriptors remain caller-owned. Remove and destroy
     unregister through the poller and clear callback/context pointers, so
     callback lifetime ends at the operation that removes the registration.
+  - Connection/reactor lifecycle adapter implemented (Task 022,
+    `native/src/connection_reactor.c`, `omni_connection_reactor_*`): the
+    adapter borrows one live reactor and one live registry, adds only OPEN
+    connections, and bridges the generic reactor callback to one synchronous
+    caller-owned connection callback. It encodes each registry
+    slot-plus-generation handle as a 64-bit reactor token, so detach retires
+    the lookup identity and stale readiness records are ignored before any
+    connection callback is invoked. The adapter owns registration
+    synchronization only; it never owns a descriptor, buffer, connection
+    lifecycle transition, callback result, queue, timer, or worker. It has no
+    heap allocation and no adapter-local per-connection storage: each attached
+    connection reuses one existing fixed registry slot, one reactor
+    registration, one poller slot/token, and the reactor's reused event record.
+    On the current 64-bit ABI, the adapter object is 40 bytes and its
+    per-attach result is 24 bytes transiently; the existing per-connection
+    registry slot is 16 bytes, reactor registration is 40 bytes, poller
+    descriptor/token storage is 16 bytes, and the reused event record is 24
+    bytes. Adapter destruction unregisters memberships without destroying
+    connections. The caller must detach before destroying or reusing a
+    connection object and must keep the borrowed registry/reactor/callback
+    storage alive until adapter destruction.
 - Caches: global byte budget (e.g. single-digit MiB default on iOS, higher
   on Linux via config), per-cache caps, idle eviction; heavy caches
   (catalog, embeddings) releasable.

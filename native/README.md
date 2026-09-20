@@ -45,7 +45,7 @@ no `-march=native`, no LTO.
 native/
   README.md                  # this file (build matrix, behavior, baseline)
   CMakeLists.txt             # Linux-first build described above
-  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h, reactor.h
+  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h, reactor.h, connection_reactor.h
   src/
     main.c                   # entry point, tiny CLI, lifecycle
     meminfo.c                # Linux /proc/self/status RSS hook (+ stub elsewhere)
@@ -59,15 +59,19 @@ native/
     connection.c             # protocol-agnostic connection owner (Task 019)
     registry.c               # bounded connection registry (Task 020)
     reactor.c                # bounded poller-to-callback reactor (Task 021)
+    connection_reactor.c     # connection lifecycle/reactor adapter (Task 022)
   tests/
     CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
     check_network_boundary.sh  # review gate: socket setup confined to src/listener.c,
                               # readiness wait to src/poller.c, accept path plus
                               # accepted-FD lifecycle to src/accepted.c, receive
-                              # to src/recv.c, and send to src/send.c;
+                              # to src/recv.c, send to src/send.c, and
+                              # connection/reactor binding to
+                              # src/connection_reactor.c;
                               # deferred layers (loop/queues/IO/scatter/TLS)
-                              # banned everywhere in production sources, heap
-                              # allocation banned in accepted.c, recv.c, send.c
+                              # banned everywhere in production sources, with
+                              # heap allocation banned in the bounded native
+                              # networking/composition layers
 ```
 
 `compat/` holds the TypeScript harness stages (Tasks 006–010); the C
@@ -653,6 +657,93 @@ failures. `npm run check:docs-all` passed all documentation gates, retaining
 only the repository's pre-existing non-blocking count/version/date drift
 warnings.
 
+## Connection/reactor lifecycle adapter (Task 022)
+
+The connection-reactor adapter is the first runtime bridge across the existing
+connection, registry, and reactor primitives (`include/omniroute/
+connection_reactor.h`, `src/connection_reactor.c`, and
+`tests/test_connection_reactor.c`):
+
+```text
+listener / accepted owner -> omni_connection -> registry membership
+                                      |
+                                      v
+                           omni_connection_reactor
+                                      |
+                                      v
+                               omni_reactor
+                                      |
+                                      v
+                         connection callback(connection, token,
+                                             events, context)
+```
+
+The public adapter surface is `omni_connection_reactor_init`,
+`omni_connection_reactor_attach`, `omni_connection_reactor_detach`, and
+`omni_connection_reactor_dispatch`, with explicit
+`omni_connection_reactor_make_inert` / `omni_connection_reactor_destroy`
+lifecycle helpers. Initialization borrows one live reactor and one live
+caller-owned registry plus one callback/context pair. Attach accepts only an
+`OPEN` connection, adds its descriptor and interest mask to the reactor, and
+returns the adapter token. Detach removes the reactor registration and the
+registry membership while leaving the connection untouched. Adapter destroy
+retires remaining memberships and registrations but never closes or destroys
+a connection.
+
+**Token lifetime and stale events**: the adapter encodes the registry handle
+as `(uint64_t)generation << 32 | index`. The registry generation changes when
+a slot is reused, so an event captured before detach cannot resolve to a later
+occupant. Detach invalidates the registry identity before returning; if an
+already-live reactor reports a removal failure, the identity is still retired
+so a later callback is ignored. Tokens do not survive registry or adapter
+destruction, and the registry's bounded 32-bit generation wrap is the only
+eventual reuse rule. Callers must detach before destroying or reusing a
+connection object and must keep the registry, reactor, callback, and context
+alive until adapter destruction.
+
+**Callback and ownership boundary**: the generic reactor callback is a small
+bridge that resolves the token through the registry and synchronously invokes
+the adapter callback only for an attached `OPEN` connection. Readable,
+writable, error, hangup, and invalid readiness bits are forwarded unchanged.
+The callback does not read or write bytes, close descriptors, transition the
+connection, or destroy objects. The adapter owns only the reactor registration
+state; the connection owns its accepted descriptor, buffers, and lifecycle;
+the registry owns borrowed connection lookup; and the reactor/poller own only
+readiness notification/bookkeeping. The adapter does not create a global,
+queue, worker, timer, or singleton.
+
+**Bounded memory**: there is no adapter heap allocation and no adapter-local
+per-connection allocation. For each attached connection, the existing fixed
+registry slot, fixed reactor registration, poller slot/token, and reused event
+record provide all steady-state storage. Attach failure rolls the registry
+membership back when reactor capacity or registration validation fails. The
+production executable remains unchanged and test-only linked libraries keep
+the Task 011 startup path socket-free.
+
+Task 022 validation covers valid and duplicate attach, valid and missing
+detach, readable/writable/error forwarding, callback context propagation,
+stale-token rejection, removal of a later event during dispatch, closed/
+invalid connection rejection, reactor-capacity rollback, reactor destruction
+without connection destruction, and 1,000 repeated attach/detach cycles.
+
+Task 022 validation record (2026-09-20): the focused
+`connection-reactor-unit` suite reports 69 checks with zero failures. The
+network-boundary gate passes, and the GCC Release startup binary remains
+4,767 bytes in `size` output with no connection, registry, reactor, poller,
+or accepted symbols linked into `omniroute-native`; one measured
+`--meminfo` run reports RSS/HWM 1,748/1,748 kB. These are the same
+test-only-linking and one-shot-process qualifications as the earlier native
+baseline, not a server-runtime memory claim.
+
+Final Task 022 validation detail: GCC Debug, GCC Release, Clang Debug, Clang
+Release, GCC ASan+UBSan Debug, and Clang ASan+UBSan Debug all built
+warning-clean. Each configuration passed all 20 CTest cases: the CLI,
+network-boundary, Tasks 012-021 regression suites, and `connection-reactor-unit`.
+The focused adapter executable was repeated in GCC and Clang Debug at 69
+checks with zero failures. `npm run check:docs-all` passed all documentation
+gates, retaining only the repository's pre-existing non-blocking count,
+version, and date drift warnings.
+
 ## Initial baseline (Task 011, measured 2026-09-19)
 
 Environment: Linux 7.2.4-zen2 x86_64, 8 CPUs, 16 GiB RAM; GCC 16.2.1,
@@ -726,6 +817,12 @@ listener, socket, bind, readiness, or payload-I/O symbols in
 `omniroute-native`; the registry lives in a separate static lib linked only
 into `test_registry`, and `main` tracks no connection).
 
+Task 022 regression target: the adapter remains test-only linked, so the
+production startup binary and its socket-free Task 011 memory baseline stay
+unchanged. The focused adapter suite and full compiler/sanitizer matrix are
+reported in the Task 022 validation record above after the final validation
+run.
+
 ## Platform boundary
 
 Linux x86_64/arm64 is the build target; the `/proc` reader is the only
@@ -743,7 +840,8 @@ Objective-C/Swift/assembly.
 (Arenas, byte buffers, listener lifecycle, readiness observation,
 accepted-socket ownership with its bounded accept drain, receive with its
 bounded drain, the immutable-span send primitive with its bounded drain,
-the protocol-agnostic connection owner, and the bounded connection registry
-are landed primitives now — see above.) Each
+the protocol-agnostic connection owner, the bounded connection registry, and
+the connection/reactor lifecycle adapter are landed primitives now — see
+above.) Each
 remaining item gets its own reviewable task.
 // linguist refresh

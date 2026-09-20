@@ -107,6 +107,12 @@ add_library(omni_registry STATIC
 add_library(omni_reactor STATIC
   src/reactor.c)
 
+# The connection/reactor adapter composes the existing connection registry,
+# connection, and reactor contracts. It remains test-only; production startup
+# still has no listener, connection, registry, or readiness wiring.
+add_library(omni_connection_reactor STATIC
+  src/connection_reactor.c)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
@@ -121,6 +127,7 @@ target_include_directories(omni_send PUBLIC include)
 target_include_directories(omni_connection PUBLIC include)
 target_include_directories(omni_registry PUBLIC include)
 target_include_directories(omni_reactor PUBLIC include)
+target_include_directories(omni_connection_reactor PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 # Strong warning set for GCC and Clang; warnings are errors on every native
@@ -155,6 +162,7 @@ omni_apply_native_flags(omni_send)
 omni_apply_native_flags(omni_connection)
 omni_apply_native_flags(omni_registry)
 omni_apply_native_flags(omni_reactor)
+omni_apply_native_flags(omni_connection_reactor)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)
