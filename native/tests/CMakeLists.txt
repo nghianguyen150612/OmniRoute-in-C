@@ -185,3 +185,15 @@ target_link_libraries(test_connection_reactor PRIVATE omni_connection_reactor om
 omni_apply_native_flags(test_connection_reactor)
 add_test(NAME connection-reactor-unit COMMAND test_connection_reactor)
 set_tests_properties(connection-reactor-unit PROPERTIES TIMEOUT 180)
+
+# Native runtime coordinator tests (Task 023): explicit subsystem startup and
+# reverse shutdown ordering, late listener-failure cleanup, invalid lifecycle
+# transitions, caller-owned connection survival, and repeated bounded cycles.
+# There is no event loop, protocol handling, or production startup wiring.
+add_executable(test_runtime test_runtime.c)
+target_link_libraries(test_runtime PRIVATE omni_runtime omni_reactor omni_registry omni_poller
+                                           omni_listener omni_connection omni_recv omni_send
+                                           omni_accepted omni_bytebuf)
+omni_apply_native_flags(test_runtime)
+add_test(NAME runtime-unit COMMAND test_runtime)
+set_tests_properties(runtime-unit PROPERTIES TIMEOUT 240)

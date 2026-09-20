@@ -744,6 +744,95 @@ checks with zero failures. `npm run check:docs-all` passed all documentation
 gates, retaining only the repository's pre-existing non-blocking count,
 version, and date drift warnings.
 
+## Native runtime coordinator foundation (Task 023)
+
+The runtime coordinator adds lifecycle orchestration over the existing native
+listener, connection registry, poller, and reactor primitives
+(`include/omniroute/runtime.h`, `src/runtime.c`, and
+`tests/test_runtime.c`):
+
+```text
+omni_runtime
+    |-- listener
+    |-- connection registry
+    |-- poller support for the reactor
+    `-- reactor
+```
+
+The public surface is `omni_runtime_make_inert`, `omni_runtime_init`,
+`omni_runtime_start`, `omni_runtime_stop`, `omni_runtime_destroy`, and
+`omni_runtime_state`. Initialization accepts one caller-owned listener,
+registry, and reactor object plus fixed backing arrays for the registry,
+poller, and reactor. The runtime embeds only the poller support object that
+the existing reactor requires; its poller descriptor/token arrays remain
+caller-owned. Capacities are explicit and independent, and no coordinator
+operation allocates, grows, queues, or retains dynamic storage.
+
+**Lifecycle**: the explicit states are `INERT`, `INITIALIZED`, `RUNNING`,
+`STOPPING`, and `STOPPED`. `init` is valid from `INERT` or `STOPPED`,
+`start` is valid only from `INITIALIZED`, and `stop` is valid only from
+`RUNNING`. `destroy` is idempotent and also cleans an initialized-but-not-
+started runtime. Failed initialization cleans every earlier subsystem and
+returns the runtime to `INERT`.
+
+**Startup order** is deterministic: the caller has already reserved the
+fixed arrays, then the coordinator initializes the registry, initializes its
+borrowed-storage poller support, initializes the reactor over that poller,
+initializes the loopback listener, and marks the runtime `INITIALIZED`.
+`start` only changes the lifecycle state to `RUNNING`; it does not wait,
+accept, dispatch, or run a loop.
+
+**Shutdown order** is the reverse: entering `STOPPING` is the explicit
+stop-accepting boundary because no accept loop exists yet; reactor
+registrations are destroyed first, registry metadata is forgotten next, the
+borrowed-storage poller support is retired, and the listener is destroyed
+last before the runtime becomes `STOPPED`. These calls reuse the existing
+primitive logic rather than duplicating registration, membership, or
+descriptor handling.
+
+**Ownership**: the runtime owns only lifecycle ordering and initialization
+flags. It borrows the caller-owned runtime context, listener, registry,
+reactor, and all backing arrays. A listener initialized through the runtime
+still follows the listener primitive's descriptor ownership and is closed by
+that listener teardown. The runtime rejects already-live subsystem objects,
+never closes random or external connection descriptors, never destroys
+connections, and never frees caller memory. Application protocol state,
+connection payloads, HTTP state, authentication, providers, TLS, and
+database state are outside this layer.
+
+**Memory**: on the current 64-bit Linux ABI, `sizeof(struct omni_runtime)`
+is 72 bytes and the transient configuration view is 104 bytes. For registry
+capacity `R`, poller capacity `P`, and reactor capacity `N`, the caller
+reserves the existing fixed arrays: `R * sizeof(struct
+omni_connection_registry_slot)` plus `P * (sizeof(struct pollfd) +
+sizeof(uint64_t))` plus `N * (sizeof(struct
+omni_reactor_registration) + sizeof(struct omni_poller_event))`. There is no
+runtime heap allocation, dynamic subsystem array, queue, timer, worker, or
+per-connection coordinator storage. These values describe the coordinator
+context and caller reservations, not a full server RSS budget.
+
+The coordinator is deliberately not wired into `omniroute-native` startup:
+`omni_runtime` is linked only into `runtime-unit`, so the existing production
+binary remains the short-lived, socket-free Task 011 skeleton. A future task
+may explicitly call the existing bounded reactor step and accept/connection
+primitives; Task 023 does not implement that loop or any protocol handling.
+
+Task 023 validation covers inert construction, successful initialization and
+state transitions, invalid reinitialization and stop/start transitions,
+late listener-failure cleanup, live-listener rejection without closing the
+external descriptor, reverse teardown, preservation of an externally owned
+open connection, idempotent destruction, and 1,000 repeated bounded
+init/start/stop/destroy cycles. The focused runtime suite reports 38 checks
+with zero failures.
+
+Final Task 023 validation detail: GCC Debug, GCC Release, Clang Debug, Clang
+Release, GCC ASan+UBSan Debug, and Clang ASan+UBSan Debug all built
+warning-clean. Each configuration passed all 21 CTest cases: the CLI,
+network-boundary gate, Tasks 012-022 regression suites, and `runtime-unit`.
+The GCC Release production executable remains 4,767 bytes in `size` output,
+and `nm` shows no runtime, listener, registry, reactor, poller, or connection
+symbols linked into `omniroute-native`; the coordinator remains test-only.
+
 ## Initial baseline (Task 011, measured 2026-09-19)
 
 Environment: Linux 7.2.4-zen2 x86_64, 8 CPUs, 16 GiB RAM; GCC 16.2.1,

@@ -404,6 +404,27 @@ recovery RSS: …  VmHWM: …  Threads: …  FDs: …
     connections. The caller must detach before destroying or reusing a
     connection object and must keep the borrowed registry/reactor/callback
     storage alive until adapter destruction.
+  - Native runtime coordinator foundation implemented (Task 023,
+    `native/src/runtime.c`, `omni_runtime_*`): the coordinator borrows one
+    caller-owned listener, registry, reactor, and all fixed backing arrays,
+    while embedding only the borrowed-storage poller support object required
+    by the reactor. It owns lifecycle ordering and four initialization flags,
+    not application or connection payload state. On the current 64-bit Linux
+    ABI, `sizeof(struct omni_runtime)` is 72 bytes and the transient
+    `struct omni_runtime_config` is 104 bytes. For registry capacity `R`,
+    poller capacity `P`, and reactor capacity `N`, caller storage is bounded
+    by `R * sizeof(struct omni_connection_registry_slot)` plus
+    `P * (sizeof(struct pollfd) + sizeof(uint64_t))` plus
+    `N * (sizeof(struct omni_reactor_registration) + sizeof(struct
+omni_poller_event))`, in addition to the existing subsystem objects. No
+    runtime path allocates, grows, queues, starts a worker, or runs a timer.
+    Initialization is registry -> poller support -> reactor -> listener;
+    shutdown is reactor -> registry -> poller support -> listener. Failed
+    initialization unwinds only completed steps. Runtime teardown never
+    destroys external connections or frees caller arrays; it closes only the
+    listener descriptor that the listener primitive initialized for this
+    runtime. There is still no event loop, HTTP, parser, protocol, auth,
+    provider, TLS, database, thread, or background-worker state.
 - Caches: global byte budget (e.g. single-digit MiB default on iOS, higher
   on Linux via config), per-cache caps, idle eviction; heavy caches
   (catalog, embeddings) releasable.

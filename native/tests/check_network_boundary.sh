@@ -1,5 +1,5 @@
 #!/bin/sh
-# Task 020 network source-boundary gate: native networking exists, but ONLY
+# Task 023 network source-boundary gate: native networking exists, but ONLY
 # in the deliberate networking layer (src/listener.c owns socket lifecycle,
 # src/poller.c owns the readiness wait, src/accepted.c owns the accept4
 # drain plus accepted-descriptor lifecycle, src/recv.c owns nonblocking
@@ -9,7 +9,9 @@
 # and src/registry.c owns borrowed-pointer membership bookkeeping with no
 # socket, readiness, payload, timer, thread, or HTTP machinery at all. The
 # connection/reactor adapter in src/connection_reactor.c only composes those
-# contracts and performs no direct descriptor or payload operation.
+# contracts and performs no direct descriptor or payload operation. The
+# runtime coordinator in src/runtime.c only sequences those existing
+# contracts and has no direct networking operation.
 # Every other production module (arena, bytebuf, meminfo, main, all other
 # headers and sources) must stay socket-free, and the deferred layers — event
 # loop, output queues, generic payload read/write, DNS/client, threads, TLS —
@@ -179,9 +181,10 @@ NOHEAP_IN_ACCEPT='\<(malloc|calloc|realloc|free|mmap)\s*\('
 
 HEAP_HITS=$(grep -nE "$NOHEAP_IN_ACCEPT" "$NATIVE_DIR/src/accepted.c" \
   "$NATIVE_DIR/src/recv.c" "$NATIVE_DIR/src/send.c" "$NATIVE_DIR/src/connection.c" \
-  "$NATIVE_DIR/src/registry.c" "$NATIVE_DIR/src/connection_reactor.c") || true
+  "$NATIVE_DIR/src/registry.c" "$NATIVE_DIR/src/connection_reactor.c" \
+  "$NATIVE_DIR/src/runtime.c") || true
 if [ -n "$HEAP_HITS" ]; then
-  echo "FAIL: heap-allocation call in accepted/recv/send/connection/registry/connection_reactor production layer (see match above)" >&2
+  echo "FAIL: heap-allocation call in accepted/recv/send/connection/registry/connection_reactor/runtime production layer (see match above)" >&2
   echo "$HEAP_HITS" >&2
   FAIL=1
 fi
@@ -190,4 +193,4 @@ if [ "$FAIL" -ne 0 ]; then
   exit 1
 fi
 
-echo "OK: networking confined to listener/poller/accepted/recv/send/connection/registry/connection_reactor production modules; send uses MSG_NOSIGNAL; no loop/scatter/generic-IO/thread/TLS calls; no heap calls in accepted.c, recv.c, send.c, connection.c, registry.c, or connection_reactor.c"
+echo "OK: networking confined to listener/poller/accepted/recv/send/connection/registry/connection_reactor production modules; runtime only coordinates lifecycle; send uses MSG_NOSIGNAL; no loop/scatter/generic-IO/thread/TLS calls; no heap calls in accepted.c, recv.c, send.c, connection.c, registry.c, connection_reactor.c, or runtime.c"
