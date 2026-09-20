@@ -45,7 +45,7 @@ no `-march=native`, no LTO.
 native/
   README.md                  # this file (build matrix, behavior, baseline)
   CMakeLists.txt             # Linux-first build described above
-  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h
+  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h
   src/
     main.c                   # entry point, tiny CLI, lifecycle
     meminfo.c                # Linux /proc/self/status RSS hook (+ stub elsewhere)
@@ -56,6 +56,8 @@ native/
     accepted.c               # accepted-socket owner + bounded accept4 drain (Task 016)
     recv.c                   # bounded nonblocking recv into bytebuf (Task 017)
     send.c                   # bounded nonblocking send from immutable span (Task 018)
+    connection.c             # protocol-agnostic connection owner (Task 019)
+    registry.c               # bounded connection registry (Task 020)
   tests/
     CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
     check_network_boundary.sh  # review gate: socket setup confined to src/listener.c,
@@ -504,6 +506,74 @@ samples of 1,748/1,748, 1,748/1,748, and 1,752/1,752 kB; connection symbols
 and native socket-layer symbols remained absent because the connection library
 is test-only linked.
 
+## Bounded connection registry (Task 020)
+
+Small membership bookkeeping for a future event loop
+(`include/omniroute/registry.h`, `src/registry.c`, unit-tested by
+`tests/test_registry.c` — 120 checks via CTest `registry-unit`, no sockets,
+no poller waits, no payload bytes). The registry stores borrowed connection
+references only and never dereferences them.
+
+- **Storage**: caller-provided fixed slot array plus the caller-owned registry
+  object. Capacity is fixed at init, never grows, and has no owned-backing
+  form. Zero capacity, NULL slots, oversized capacity beyond the 32-bit handle
+  position space, and re-init of a live registry are rejected; all other
+  failures leave the registry inert. Steady-state add/remove/find/iterate and
+  destroy never allocate.
+- **Ownership**: the registry owns slots and handle metadata only. Connections
+  stay externally owned from add until after remove or registry destroy.
+  Remove forgets one entry without touching its connection; destroy forgets
+  every entry without touching any connection and without releasing the caller
+  slot array. The caller keeps connections and slots alive until after destroy.
+- **Handles**: opaque slot-plus-generation pairs. A handle is valid only while
+  the registry is live and its entry is still present with the same generation.
+  Removal preserves the stored generation so the next occupant of the same
+  position carries a different generation; the old handle then fails lookup
+  and fails a second remove. Handles never survive destroy and must be dropped
+  by the caller. Raw positions are never exposed as identities; iteration
+  publishes handles alongside pointers.
+- **Add/remove**: deterministic first-free-position placement; duplicate pointer
+  tracking is rejected; beyond capacity addition reports FULL with state
+  unchanged. Removal reports NOT_FOUND for unknown positions, generation
+  mismatches, the invalid sentinel, and stale handles, with state unchanged.
+- **Lookup**: resolves a handle to its borrowed connection or NULL for any
+  stale, unknown, or non-live case. Never mutates the registry.
+- **Iteration**: live entries visit in increasing slot order with no extra
+  storage via a caller cursor. Never mutates the registry, so entries removed
+  mid-scan are skipped safely. No callbacks exist at this layer.
+- **Memory cost**: registry object holds one borrowed array reference plus two
+  counts and a liveness flag (32 bytes on 64-bit). Each slot holds one borrowed
+  connection reference plus one generation counter plus one occupancy flag (16
+  bytes on 64-bit: 8 pointer + 4 generation + 1 flag + 3 pad). No chains, no
+  spare lists, no hidden blocks.
+- **Not this task**: no event loop, no polling, no accept loop, no HTTP, no
+  routing, no timers, no threads, no descriptor or poller interaction.
+- **Boundary gate**: `check_network_boundary.sh` keeps socket, readiness,
+  accept, receive, send, and lifecycle tokens in their dedicated modules;
+  `registry.c` carries none of them and joins the zero-heap negative control
+  with accepted, receive, send, and connection layers.
+
+`main` still links only `src/main.c` and `src/meminfo.c`; `omni_registry` is
+linked only into `test_registry`, so normal `omniroute-native` startup
+remains the Task 011 short-lived executable.
+
+Task 020 validation record (2026-09-20): the focused `registry-unit` test
+passed 120 checks with zero failures, and the updated network-boundary gate
+passed. The complete compiler/sanitizer matrix and regression sweep are
+recorded after the final validation run below.
+
+Final Task 020 validation detail: GCC Debug, GCC Release, Clang Debug, Clang
+Release, GCC ASan+UBSan Debug, and Clang ASan+UBSan Debug each built
+warning-clean and passed all 18 CTest cases. The focused registry suite was
+also repeated five times at 120 checks with zero failures. `npm run
+check:docs-all` passed documentation sync, frontmatter, environment sync,
+internal links, and fabricated-doc checks; it retained only the repository's
+pre-existing soft count/version/date drift warnings. The GCC Release
+`omniroute-native` remained 16,640 bytes (`size` dec 4,767), with RSS/HWM
+samples of 1,748/1,748, 1,748/1,748, and 1,748/1,748 kB; registry, connection,
+and native socket-layer symbols remained absent because the registry library
+is test-only linked.
+
 ## Initial baseline (Task 011, measured 2026-09-19)
 
 Environment: Linux 7.2.4-zen2 x86_64, 8 CPUs, 16 GiB RAM; GCC 16.2.1,
@@ -563,6 +633,20 @@ readiness, or payload-I/O symbols in `omniroute-native`; the send layer lives
 in a separate static lib linked only into `test_send`, and `main` sends
 nothing).
 
+Task 019 regression: unchanged — 16,640 bytes, `size` dec 4,767, and
+one-shot `--meminfo` samples of 1,748–1,752 kB for both RSS and peak HWM
+(`nm` confirms no connection, send, receive, accepted, poller, listener,
+socket, bind, readiness, or payload-I/O symbols in `omniroute-native`; the
+connection layer lives in a separate static lib linked only into
+`test_connection`, and `main` owns no connection).
+
+Task 020 regression: unchanged — 16,640 bytes, `size` dec 4,767, and
+one-shot `--meminfo` samples of 1,748 kB for both RSS and peak HWM
+(`nm` confirms no registry, connection, send, receive, accepted, poller,
+listener, socket, bind, readiness, or payload-I/O symbols in
+`omniroute-native`; the registry lives in a separate static lib linked only
+into `test_registry`, and `main` tracks no connection).
+
 ## Platform boundary
 
 Linux x86_64/arm64 is the build target; the `/proc` reader is the only
@@ -579,6 +663,7 @@ auth, providers, routing, streaming, compression, MCP, A2A,
 Objective-C/Swift/assembly.
 (Arenas, byte buffers, listener lifecycle, readiness observation,
 accepted-socket ownership with its bounded accept drain, receive with its
-bounded drain, and the immutable-span send primitive with its bounded drain
+bounded drain, the immutable-span send primitive with its bounded drain,
+the protocol-agnostic connection owner, and the bounded connection registry
 are landed primitives now — see above.) Each
 remaining item gets its own reviewable task.

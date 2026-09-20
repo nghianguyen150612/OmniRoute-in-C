@@ -354,6 +354,18 @@ recovery RSS: …  VmHWM: …  Threads: …  FDs: …
     metadata. Receive and send remain delegated to the Task 017/018
     primitives; there is no automatic poller registration, output queue,
     output storage, HTTP state, event loop, or heap allocation.
+  - Bounded connection registry implemented (Task 020,
+    `native/src/registry.c`, `omni_connection_registry_*`): caller-provided
+    fixed slot array with no growth path and no owned-backing form. Each slot
+    holds one borrowed connection reference plus one generation counter plus
+    one occupancy flag (16 bytes on 64-bit); the registry object holds one
+    borrowed array reference plus two counts and a liveness flag (32 bytes on
+    64-bit). Handles are slot-plus-generation pairs that retire at remove and
+    at destroy; remove and destroy never touch connections, never close
+    descriptors, and never allocate. Iteration visits live entries in
+    increasing slot order with a caller cursor and no extra storage. There is
+    still no event loop, polling, accept loop, HTTP, routing, timers, or
+    threads.
 - Caches: global byte budget (e.g. single-digit MiB default on iOS, higher
   on Linux via config), per-cache caps, idle eviction; heavy caches
   (catalog, embeddings) releasable.

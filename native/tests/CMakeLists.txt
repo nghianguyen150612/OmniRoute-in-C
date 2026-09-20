@@ -149,3 +149,14 @@ target_link_libraries(test_connection PRIVATE omni_connection omni_recv omni_sen
 omni_apply_native_flags(test_connection)
 add_test(NAME connection-unit COMMAND test_connection)
 set_tests_properties(connection-unit PROPERTIES TIMEOUT 240)
+
+# Bounded connection registry tests (Task 020): caller-owned slots, handle
+# generations, add/remove/lookup, deterministic iteration, stress, and
+# caller-ownership survival. Pure bookkeeping, no sockets, no poller waits,
+# no payload transfer, and no production event loop.
+add_executable(test_registry test_registry.c)
+target_link_libraries(test_registry PRIVATE omni_registry omni_connection omni_recv omni_send
+                                             omni_accepted omni_listener omni_poller omni_bytebuf)
+omni_apply_native_flags(test_registry)
+add_test(NAME registry-unit COMMAND test_registry)
+set_tests_properties(registry-unit PROPERTIES TIMEOUT 120)

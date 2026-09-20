@@ -92,6 +92,14 @@ add_library(omni_send STATIC
 add_library(omni_connection STATIC
   src/connection.c)
 
+# Bounded connection registry tracks borrowed connection references for a
+# future event loop. It is linked only into the registry tests:
+# omniroute-native remains a short-lived, socket-free executable until a
+# later server-runtime task deliberately wires a dispatcher in.
+
+add_library(omni_registry STATIC
+  src/registry.c)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
@@ -104,6 +112,7 @@ target_include_directories(omni_accepted PUBLIC include)
 target_include_directories(omni_recv PUBLIC include)
 target_include_directories(omni_send PUBLIC include)
 target_include_directories(omni_connection PUBLIC include)
+target_include_directories(omni_registry PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 # Strong warning set for GCC and Clang; warnings are errors on every native
@@ -136,6 +145,7 @@ omni_apply_native_flags(omni_accepted)
 omni_apply_native_flags(omni_recv)
 omni_apply_native_flags(omni_send)
 omni_apply_native_flags(omni_connection)
+omni_apply_native_flags(omni_registry)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)

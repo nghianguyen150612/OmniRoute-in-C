@@ -1,18 +1,21 @@
 #!/bin/sh
-# Task 018 network source-boundary gate: native networking exists, but ONLY
+# Task 020 network source-boundary gate: native networking exists, but ONLY
 # in the deliberate networking layer (src/listener.c owns socket lifecycle,
 # src/poller.c owns the readiness wait, src/accepted.c owns the accept4
 # drain plus accepted-descriptor lifecycle, src/recv.c owns nonblocking
 # socket receive into byte buffers, src/send.c owns nonblocking socket send
-# with its required per-call SIGPIPE guard, and src/connection.c owns the
-# higher-level transfer/lifecycle composition without direct socket calls.
+# with its required per-call SIGPIPE guard, src/connection.c owns the
+# higher-level transfer/lifecycle composition without direct socket calls,
+# and src/registry.c owns borrowed-pointer membership bookkeeping with no
+# socket, readiness, payload, timer, thread, or HTTP machinery at all.
 # Every other production module (arena, bytebuf, meminfo, main, all other
 # headers and sources) must stay socket-free, and the deferred layers — event
 # loop, output queues, generic payload read/write, DNS/client, threads, TLS —
 # stay banned from ALL production sources, including the networking layer
 # itself except for the one authorized send call in src/send.c. The accept
 # path is confined to src/accepted.c, the receive path to src/recv.c, the
-# send path to src/send.c, and connection composition to src/connection.c,
+# send path to src/send.c, connection composition to src/connection.c, and
+# membership bookkeeping to src/registry.c,
 # exactly as the readiness wait is confined to src/poller.c. Later tasks
 # extend this gate explicitly; they never loosen it silently.
 #
@@ -163,17 +166,18 @@ if [ -n "$SEND_FORBIDDEN_HITS" ]; then
   FAIL=1
 fi
 
-# 10. Zero-heap rule for the accept, receive, and send layers: bounded
-# acceptance, bounded drain, single receive, single send, and both bounded
-# bounded drain, single receive, and bounded receive drain perform no heap
-# allocation, so allocator tokens are banned outright (negative control for
-# the Task 016/017/018 contracts).
+# 10. Zero-heap rule for the accept, receive, send, connection, and
+# registry layers: bounded acceptance, bounded drain, single receive,
+# single send, both bounded drains, lifecycle composition, and membership
+# bookkeeping perform no heap allocation, so allocator tokens are banned
+# outright (negative control for the Task 016/017/018/019/020 contracts).
 NOHEAP_IN_ACCEPT='\<(malloc|calloc|realloc|free|mmap)\s*\('
 
 HEAP_HITS=$(grep -nE "$NOHEAP_IN_ACCEPT" "$NATIVE_DIR/src/accepted.c" \
-  "$NATIVE_DIR/src/recv.c" "$NATIVE_DIR/src/send.c" "$NATIVE_DIR/src/connection.c") || true
+  "$NATIVE_DIR/src/recv.c" "$NATIVE_DIR/src/send.c" "$NATIVE_DIR/src/connection.c" \
+  "$NATIVE_DIR/src/registry.c") || true
 if [ -n "$HEAP_HITS" ]; then
-  echo "FAIL: heap-allocation call in accepted/recv/send/connection production layer (see match above)" >&2
+  echo "FAIL: heap-allocation call in accepted/recv/send/connection/registry production layer (see match above)" >&2
   echo "$HEAP_HITS" >&2
   FAIL=1
 fi
@@ -182,4 +186,4 @@ if [ "$FAIL" -ne 0 ]; then
   exit 1
 fi
 
-echo "OK: networking confined to listener/poller/accepted/recv/send/connection production modules; send uses MSG_NOSIGNAL; no loop/scatter/generic-IO/thread/TLS calls; no heap calls in accepted.c, recv.c, send.c, or connection.c"
+echo "OK: networking confined to listener/poller/accepted/recv/send/connection/registry production modules; send uses MSG_NOSIGNAL; no loop/scatter/generic-IO/thread/TLS calls; no heap calls in accepted.c, recv.c, send.c, connection.c, or registry.c"
