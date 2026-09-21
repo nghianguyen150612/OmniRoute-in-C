@@ -241,3 +241,13 @@ target_link_libraries(test_connection_runtime PRIVATE omni_connection_runtime om
 omni_apply_native_flags(test_connection_runtime)
 add_test(NAME connection-runtime-unit COMMAND test_connection_runtime)
 set_tests_properties(connection-runtime-unit PROPERTIES TIMEOUT 240)
+
+# Bounded connection manager tests (Task 028): fixed collection of active
+# runtime attachments, lifecycle, bounded capacity, token invalidation,
+# reactor cleanup, ownership preservation. Loopback-only, self-cleaning,
+# no heap, no protocol, no production server.
+add_executable(test_connection_manager test_connection_manager.c)
+target_link_libraries(test_connection_manager PRIVATE omni_connection_manager omni_connection_runtime omni_connection_session omni_connection_io omni_connection omni_connection_reactor omni_reactor omni_registry omni_poller omni_event_loop omni_runtime omni_listener omni_recv omni_send omni_accepted omni_bytebuf)
+omni_apply_native_flags(test_connection_manager)
+add_test(NAME connection-manager-unit COMMAND test_connection_manager)
+set_tests_properties(connection-manager-unit PROPERTIES TIMEOUT 240)

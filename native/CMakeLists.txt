@@ -145,6 +145,12 @@ add_library(omni_connection_session STATIC
 add_library(omni_connection_runtime STATIC
   src/connection_runtime.c)
 
+# Bounded connection manager layer (Task 028). Manages a fixed collection
+# of active connection_runtime attachments without protocol behavior.
+# Remains test-only.
+add_library(omni_connection_manager STATIC
+  src/connection_manager.c)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
@@ -165,6 +171,7 @@ target_include_directories(omni_event_loop PUBLIC include)
 target_include_directories(omni_connection_io PUBLIC include)
 target_include_directories(omni_connection_session PUBLIC include)
 target_include_directories(omni_connection_runtime PUBLIC include)
+target_include_directories(omni_connection_manager PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 target_link_libraries(omni_event_loop PUBLIC omni_runtime omni_reactor omni_registry omni_poller
@@ -208,6 +215,7 @@ omni_apply_native_flags(omni_event_loop)
 omni_apply_native_flags(omni_connection_io)
 omni_apply_native_flags(omni_connection_session)
 omni_apply_native_flags(omni_connection_runtime)
+omni_apply_native_flags(omni_connection_manager)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)
