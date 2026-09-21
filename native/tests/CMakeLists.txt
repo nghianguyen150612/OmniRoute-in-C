@@ -231,3 +231,13 @@ target_link_libraries(test_connection_session PRIVATE omni_connection_session om
 omni_apply_native_flags(test_connection_session)
 add_test(NAME connection-session-unit COMMAND test_connection_session)
 set_tests_properties(connection-session-unit PROPERTIES TIMEOUT 240)
+
+# Bounded connection runtime binding tests (Task 027): lifecycle coordination
+# between event loop, connection reactor and connection session without
+# protocol logic. Loopback-only, self-cleaning, no heap, no production
+# server.
+add_executable(test_connection_runtime test_connection_runtime.c)
+target_link_libraries(test_connection_runtime PRIVATE omni_connection_runtime omni_connection_session omni_connection_io omni_connection omni_connection_reactor omni_reactor omni_registry omni_poller omni_event_loop omni_runtime omni_listener omni_recv omni_send omni_accepted omni_bytebuf)
+omni_apply_native_flags(test_connection_runtime)
+add_test(NAME connection-runtime-unit COMMAND test_connection_runtime)
+set_tests_properties(connection-runtime-unit PROPERTIES TIMEOUT 240)

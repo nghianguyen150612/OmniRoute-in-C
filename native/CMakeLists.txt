@@ -139,6 +139,12 @@ add_library(omni_connection_io STATIC
 add_library(omni_connection_session STATIC
   src/connection_session.c)
 
+# Bounded connection runtime binding layer (Task 027). Coordinates event loop,
+# connection reactor and connection session without protocol behavior.
+# Remains test-only.
+add_library(omni_connection_runtime STATIC
+  src/connection_runtime.c)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
@@ -158,6 +164,7 @@ target_include_directories(omni_runtime PUBLIC include)
 target_include_directories(omni_event_loop PUBLIC include)
 target_include_directories(omni_connection_io PUBLIC include)
 target_include_directories(omni_connection_session PUBLIC include)
+target_include_directories(omni_connection_runtime PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 target_link_libraries(omni_event_loop PUBLIC omni_runtime omni_reactor omni_registry omni_poller
@@ -200,6 +207,7 @@ omni_apply_native_flags(omni_runtime)
 omni_apply_native_flags(omni_event_loop)
 omni_apply_native_flags(omni_connection_io)
 omni_apply_native_flags(omni_connection_session)
+omni_apply_native_flags(omni_connection_runtime)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)

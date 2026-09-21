@@ -486,6 +486,34 @@ CLOSING` and is idempotent from `CLOSING`/`CLOSED`; destroy releases both
       objects already accounted for, with no per-read/write allocation, no queue,
       and no hidden heap. Protocols, parsers, timers, threads, and production
       startup wiring remain deferred.
+  - Bounded connection runtime binding implemented (Task 027,
+    `native/src/connection_runtime.c`, `omni_connection_runtime_*`): the
+    binding borrows a live `omni_connection_registry`, a live
+    `omni_connection_reactor` adapter, and an optional `omni_event_loop`,
+    plus a caller-provided fixed array of `omni_connection_runtime_entry`
+    objects. It owns session lifecycle bookkeeping and bounded attachment
+    metadata only: each occupied entry holds a borrowed `omni_connection *`,
+    an owned `omni_connection_session` (which itself owns the `io`), a
+    reactor token, and an occupancy flag. It never owns descriptors, never
+    destroys accepted sockets, never frees connections, never allocates,
+    never owns the poller, and never runs the event loop. `init` binds the
+    borrowed registry/adapter/event_loop and the entry array and moves
+    `NEW -> INITIALIZED`; `attach` finds a free entry, creates/opens the
+    session from caller-provided recv/send backing, registers via the
+    adapter, stores the token, and moves to `ATTACHED`; `detach`
+    unregisters via the adapter, destroys the session, clears the entry,
+    and returns to `INITIALIZED` when the last entry is gone (otherwise stays
+    `ATTACHED`); `destroy` detaches all entries and moves `-> CLOSED`.
+    On the current 64-bit Linux ABI, `struct omni_connection_runtime` is
+    56 bytes (8 registry + 8 adapter + 8 event_loop + 8 entries + 8 capacity
+    - 8 count + 4 state + 1 live + 7 pad) and
+      `struct omni_connection_runtime_entry` is 184 bytes (8 connection +
+      160 session + 8 token + 1 occupied + 7 pad). For capacity `N` with
+      per-session `R+S` backing, the caller reserves `N * 184 + N*(R+S)` bytes
+      for the entry array plus the registry/poller/reactor backing already
+      accounted for, plus the 56-byte runtime object itself. No per-attach heap,
+      no dynamic map, no queue. Protocols, parsers, timers, threads, and
+      production startup wiring remain deferred.
 - Caches: global byte budget (e.g. single-digit MiB default on iOS, higher
   on Linux via config), per-cache caps, idle eviction; heavy caches
   (catalog, embeddings) releasable.

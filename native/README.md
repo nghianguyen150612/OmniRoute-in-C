@@ -45,7 +45,7 @@ no `-march=native`, no LTO.
 native/
   README.md                  # this file (build matrix, behavior, baseline)
   CMakeLists.txt             # Linux-first build described above
-  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h, reactor.h, connection_reactor.h, runtime.h, event_loop.h, connection_io.h, connection_session.h
+  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h, reactor.h, connection_reactor.h, runtime.h, event_loop.h, connection_io.h, connection_session.h, connection_runtime.h
   src/
     main.c                   # entry point, tiny CLI, lifecycle
     meminfo.c                # Linux /proc/self/status RSS hook (+ stub elsewhere)
@@ -64,6 +64,7 @@ native/
     event_loop.c             # bounded synchronous runtime event loop (Task 024)
     connection_io.c          # bounded connection I/O state machine (Task 025)
     connection_session.c     # bounded connection/session integration (Task 026)
+    connection_runtime.c     # bounded connection runtime binding (Task 027)
   tests/
     CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
     check_network_boundary.sh  # review gate: socket setup confined to src/listener.c,
@@ -73,8 +74,9 @@ native/
                               # connection/reactor binding to
                               # src/connection_reactor.c, event-loop
                               # orchestration to src/event_loop.c, connection I/O to
-                              # src/connection_io.c, and session coordination to
-                              # src/connection_session.c; alternate
+                              # src/connection_io.c, session coordination to
+                              # src/connection_session.c, and runtime binding to
+                              # src/connection_runtime.c; alternate
                               # loop backends, queues, IO/scatter/TLS are
                               # banned everywhere in production sources, with
                               # heap allocation banned in the bounded native
@@ -1171,6 +1173,118 @@ passed the same 24 cases. `npm run check:docs-all` passed its documentation
 gates with only the repository's pre-existing soft count/version/date drift
 warnings.
 
+## Bounded connection runtime binding (Task 027)
+
+Task 027 is the bounded runtime binding layer that coordinates the event
+loop, connection reactor, and connection session without introducing protocol
+behavior (`include/omniroute/connection_runtime.h`,
+`src/connection_runtime.c`, and `tests/test_connection_runtime.c`):
+
+```text
+connection
+    |
+connection_session (create/open on attach)
+    |
+connection_reactor registration (token)
+    |
+event_loop dispatch (reactor_step -> dispatch)
+```
+
+Expected integration flow:
+
+```text
+event_loop
+    |
+connection_reactor (registry + reactor)
+    |
+connection_runtime (bounded entries)
+    |
+connection_session -> connection_io -> recv/send -> bytebuf
+    |
+connection (accepted FD)
+```
+
+The public surface is `omni_connection_runtime_make_inert`,
+`omni_connection_runtime_init`, `omni_connection_runtime_attach`,
+`omni_connection_runtime_detach`, and
+`omni_connection_runtime_destroy`, with
+`omni_connection_runtime_state`,
+`omni_connection_runtime_count`/`capacity`/`is_initialized`,
+`omni_connection_runtime_find_session`, and
+`omni_connection_runtime_fd`. `init` binds a live
+`omni_connection_registry`, live `omni_connection_reactor` adapter, optional
+borrowed `omni_event_loop`, and a caller-provided fixed array of
+`omni_connection_runtime_entry` objects. `attach` validates an `OPEN`
+`omni_connection` and caller-provided recv/send backing, finds a free entry,
+creates/opens the owned `omni_connection_session` (which owns its
+`omni_connection_io` and two borrowed bytebufs), then registers the
+connection's borrowed descriptor through the existing adapter and stores the
+resulting token. No heap allocation occurs.
+
+**State machine**: the runtime object has explicit states `NEW`,
+`INITIALIZED`, `ATTACHED`, `DETACHING`, and `CLOSED`. `make_inert`
+canonicalizes fresh or `CLOSED` storage to `NEW`. `init` requires `NEW` and
+transitions to `INITIALIZED`; invalid input leaves it `NEW`. `attach` is
+valid from `INITIALIZED` or `ATTACHED`, transitions to `ATTACHED` and
+increments `count`; duplicate, full, or invalid input leaves the runtime
+consistent with `count` unchanged and no partial entry. `detach` is valid
+from `INITIALIZED` or `ATTACHED`, unregisters via the adapter, destroys the
+owned session, clears the entry, decrements `count`, and returns to
+`INITIALIZED` when the last entry is removed (otherwise stays `ATTACHED`);
+`DETACHING` is the transient synchronous detach marker, not a persistent
+state. Missing target returns `ERR_NOT_FOUND` without corrupting state.
+`destroy` detaches all occupied entries, releases session bookkeeping, and
+reaches `CLOSED`; it is idempotent and safe on `NULL`, `NEW`,
+`INITIALIZED`, `ATTACHED`, and `CLOSED`.
+
+**Integration**: the runtime stores only borrowed `registry`, `adapter`,
+`event_loop` pointers plus the borrowed fixed entry array and `count`/`capacity`
+plus state. It creates/opens the session on `attach` and closes/destroys it
+on `detach`/`destroy`, then delegates registration to the existing
+`omni_connection_reactor_attach`/`detach` helpers which preserve token
+ownership rules (generation << 32 | index). Stale tokens captured before
+`detach` dispatch as `IGNORED` via the adapter. The runtime never reads or
+writes payload bytes, never parses, never processes requests, never closes a
+descriptor, never destroys an `omni_accepted` owner, never frees a
+connection, never owns a poller, and never runs the event loop.
+
+**Memory**: on the current 64-bit Linux ABI, `struct
+omni_connection_runtime` is 56 bytes (`registry*8 + adapter*8 +
+event_loop*8 + entries*8 + capacity8 + count8 + state4 + live1 + 7 pad) and
+`struct omni_connection_runtime_entry` is 184 bytes (`connection*8 +
+session160 + token8 + occupied1 + 7 pad`). `struct
+omni_connection_session`remains 160 bytes and its config 40 bytes, while`struct omni_connection_runtime_config`and`omni_connection_runtime_attach_config`are each 40 bytes transient. For
+capacity`N`with per-session`R+S`backing, the caller reserves`N *
+184 + N*(R+S)` bytes for the runtime entries plus the registry/poller/reactor
+backing already accounted for, plus the 56-byte runtime object itself. There
+is no per-attach heap allocation, no dynamic map, no queue.
+
+**Protocol boundary**: HTTP, JSON, OpenAI API, authentication, routing, TLS,
+database, and parser logic remain deferred. The binding layer only coordinates
+lifecycle and token registration.
+
+Task 027 validation covers inert state, valid/invalid initialization
+(NULL registry/adapter, zero capacity, double init), attach success
+(token, count, state, session FD, reactor/registry counts, duplicate
+rejection), detach success (count, state, session gone, reactor/registry
+cleanup, connection live preserved, NOT_FOUND on second detach), invalid
+transitions (attach from NEW, NULL connection, zero caps, over capacity
+FULL), stale registration handling (old token IGNORED, new token differs),
+descriptor and connection ownership preservation after attach/detach/destroy,
+session lifecycle integration (session OPEN, io OPEN, buffers distinct,
+readable/writable delegation), reactor registration cleanup on destroy,
+20 repeated attach/detach cycles, bystander-FD census, and bounded-size
+checks. The focused runtime suite reports 259 checks with zero failures.
+
+Final Task 027 validation detail: GCC Debug, GCC Release, Clang Debug, Clang
+Release, GCC ASan+UBSan Debug, and Clang ASan+UBSan Debug all built
+warning-clean. Each configuration passed all 25 CTest cases, covering the
+CLI, network-boundary gate, Tasks 012-026 regression suites, and
+`connection-runtime-unit`; the canonical `npm run test:native` Debug run
+passed the same 25 cases. `npm run check:docs-all` passed its documentation
+gates with only the repository's pre-existing soft count/version/date drift
+warnings.
+
 ## Initial baseline (Task 011, measured 2026-09-19)
 
 Environment: Linux 7.2.4-zen2 x86_64, 8 CPUs, 16 GiB RAM; GCC 16.2.1,
@@ -1269,8 +1383,9 @@ accepted-socket ownership with its bounded accept drain, receive with its
 bounded drain, the immutable-span send primitive with its bounded drain,
 the protocol-agnostic connection owner, the bounded connection registry, the
 connection/reactor lifecycle adapter, the runtime coordinator, the bounded
-synchronous event loop, the bounded connection I/O state machine, and the
-bounded connection/session integration are
+synchronous event loop, the bounded connection I/O state machine, the
+bounded connection/session integration, and the
+bounded connection runtime binding are
 landed primitives now — see above.) Each
 remaining item gets its own reviewable task.
 // linguist refresh
