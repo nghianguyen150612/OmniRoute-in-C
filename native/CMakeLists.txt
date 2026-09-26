@@ -151,6 +151,13 @@ add_library(omni_connection_runtime STATIC
 add_library(omni_connection_manager STATIC
   src/connection_manager.c)
 
+# Bounded connection admission pipeline (Task 029). Coordinates the existing
+# listener/accepted/connection/manager layers with caller-owned slot and
+# buffer storage. Remains test-only; production startup and binary stay free
+# of networking and admission wiring.
+add_library(omni_connection_admission STATIC
+  src/connection_admission.c)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
@@ -172,6 +179,7 @@ target_include_directories(omni_connection_io PUBLIC include)
 target_include_directories(omni_connection_session PUBLIC include)
 target_include_directories(omni_connection_runtime PUBLIC include)
 target_include_directories(omni_connection_manager PUBLIC include)
+target_include_directories(omni_connection_admission PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 target_link_libraries(omni_event_loop PUBLIC omni_runtime omni_reactor omni_registry omni_poller
@@ -216,6 +224,7 @@ omni_apply_native_flags(omni_connection_io)
 omni_apply_native_flags(omni_connection_session)
 omni_apply_native_flags(omni_connection_runtime)
 omni_apply_native_flags(omni_connection_manager)
+omni_apply_native_flags(omni_connection_admission)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)

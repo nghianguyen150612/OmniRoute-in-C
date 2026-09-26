@@ -45,7 +45,7 @@ no `-march=native`, no LTO.
 native/
   README.md                  # this file (build matrix, behavior, baseline)
   CMakeLists.txt             # Linux-first build described above
-  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h, reactor.h, connection_reactor.h, runtime.h, event_loop.h, connection_io.h, connection_session.h, connection_runtime.h, connection_manager.h
+  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h, reactor.h, connection_reactor.h, runtime.h, event_loop.h, connection_io.h, connection_session.h, connection_runtime.h, connection_manager.h, connection_admission.h
   src/
     main.c                   # entry point, tiny CLI, lifecycle
     meminfo.c                # Linux /proc/self/status RSS hook (+ stub elsewhere)
@@ -66,9 +66,11 @@ native/
     connection_session.c     # bounded connection/session integration (Task 026)
     connection_runtime.c     # bounded connection runtime binding (Task 027)
     connection_manager.c     # bounded runtime membership (Task 028)
+    connection_admission.c   # bounded accept-to-manager admission (Task 029)
   tests/
     CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
     test_connection_manager.c # bounded manager unit, rollback, ownership, and stress checks
+    test_connection_admission.c # bounded admission, rollback, ownership, and stress checks
     check_network_boundary.sh  # review gate: socket setup confined to src/listener.c,
                               # readiness wait to src/poller.c, accept path plus
                               # accepted-FD lifecycle to src/accepted.c, receive
@@ -78,8 +80,9 @@ native/
                               # orchestration to src/event_loop.c, connection I/O to
                               # src/connection_io.c, session coordination to
                               # src/connection_session.c, runtime binding to
-                              # src/connection_runtime.c, and membership to
-                              # src/connection_manager.c; alternate
+                              # src/connection_runtime.c, membership to
+                              # src/connection_manager.c, and admission to
+                              # src/connection_admission.c; alternate
                               # loop backends, queues, IO/scatter/TLS are
                               # banned everywhere in production sources, with
                               # heap allocation banned in the bounded native
@@ -1358,6 +1361,103 @@ network-boundary gate, Tasks 012-027 regressions, and
 `connection-manager-unit`. `npm run check:docs-all` passed; it reported
 the repository's existing soft count/version/date drift warnings, with no
 documentation check failures.
+
+## Bounded connection admission (Task 029)
+
+Task 029 adds the test-only bridge from an already-live listener into the
+existing bounded manager (`include/omniroute/connection_admission.h`,
+`src/connection_admission.c`, and `tests/test_connection_admission.c`):
+
+```text
+borrowed listener
+    |
+omni_accept_once (at most one per call)
+    |
+temporary omni_accepted owner
+    |
+omni_connection_init + omni_connection_from_accepted
+    |
+omni_connection_manager_add (session/runtime/reactor attach)
+    |
+published fixed admission slot + generation identity
+```
+
+The public surface is `omni_connection_admission_make_inert`,
+`omni_connection_admission_init`, `omni_connection_admission_once`,
+`omni_connection_admission_drain`, `omni_connection_admission_release`,
+`omni_connection_admission_stop`, `omni_connection_admission_destroy`, and
+the state/count/capacity queries. Every connection slot and receive/send byte
+range is caller-provided. Initialization requires a nonzero admission
+capacity no greater than the manager capacity, enough slot bytes, and three
+non-overlapping fixed pools: connection receive, session receive, and session
+send. Pool sizes and all capacity multiplications are checked before use.
+There is no per-connection allocation or growth.
+
+`once` checks lifecycle and both capacities before accepting, then prepares a
+connection, transfers the accepted owner, and attaches through the manager.
+The slot and admission count become visible only after manager attach
+succeeds. A preparation failure destroys the temporary accepted owner. An
+adoption failure destroys whichever owner still holds the FD. A manager/runtime
+attach failure leaves manager membership unpublished and destroys the
+connection owner, which releases the accepted FD through its existing
+connection API. Earlier successful admissions from a later-stopping drain
+remain live.
+
+`drain` requires a finite nonzero attempt limit and caller-owned identity
+output with at least that many elements. Each attempt calls the existing
+one-shot accept operation at most once. It returns the exact successful
+admission count and distinguishes queue drained, budget reached, slot full,
+manager/runtime full, interruption, transient handshake failure, accept
+failure, connection failure, and manager failure. It stops before accepting
+when either manager or admission storage is full.
+
+The lifecycle is `NEW -> INITIALIZED -> ACTIVE -> STOPPING -> CLOSED`.
+Successful first admission enters `ACTIVE`; `stop` forbids new admissions
+but continues to allow release. Release checks both slot index and the
+manager's existing generation token, removes manager/runtime/reactor/session
+membership first, then destroys the connection and makes the slot reusable.
+Destroy applies the same ordering to every occupied slot. If a lower-layer
+detach reports an error, admission retains the connection slot and backing
+references rather than destroying storage that may still be referenced.
+
+The admission layer owns only slot occupancy and lifecycle coordination. It
+borrows the listener, manager/runtime/registry/reactor/event loop, slot array,
+and all three byte pools. `accept` gives the temporary `omni_accepted` sole FD
+ownership; `omni_connection_from_accepted` moves that ownership to
+`omni_connection`; the manager/session/reactor only borrow it. Admission
+release/destroy never calls `close` directly and never destroys the listener,
+manager dependencies, or caller-side client descriptors. No readiness loop is
+started, and no payload is read or written.
+
+**Measured admission memory**: on the current 64-bit Linux ABI, the focused
+test measured `sizeof(struct omni_connection_admission)` as 96 bytes,
+`sizeof(struct omni_connection_admission_slot)` as 88 bytes,
+`sizeof(struct omni_connection_admission_config)` as 112 bytes, and
+`sizeof(struct omni_connection_admission_result)` as 56 bytes. For capacity
+`N`, connection receive slice `C`, session receive slice `R`, and session send
+slice `S`, caller-reserved admission storage is `96 + N * (88 + C + R + S)`
+bytes on this ABI. The 88-byte slot already contains its `omni_connection`;
+the three byte pools are separate borrowed storage. Config/result temporaries
+and the per-drain caller identity output (`max_attempts` identities) are
+separate transient storage. External manager/runtime/registry/reactor/poller
+arrays are not part of that reservation formula.
+
+Task 029 validation covers invalid/overflowing configuration, empty and
+successful one-shot admission, bounded multi-client drain, manager and slot
+capacity, preparation and runtime-attach rollback, stale identity and reactor
+token rejection after slot reuse, STOPPING release, empty/single/multiple
+destruction, bystander descriptor and dependency survival, and 1,000
+deterministic admission/release cycles with a Linux FD census on each cycle.
+The focused suite reports 1,141 checks with zero failures and prints its
+measured structure sizes. The manager and admission libraries remain absent
+from the production executable; the native CLI does not start a listener.
+GCC 16.2.1 and Clang 22.1.8 each passed Debug, Release, and Debug
+ASan+UBSan builds, with all 27 native CTest cases green in every
+configuration. The network-boundary gate passed. `npm run check:docs-all`
+passed with 91 existing soft documentation-drift warnings and no broken-link
+or fabricated-reference findings. The production CLI startup and version
+output remain unchanged, and `nm` found no admission/manager/runtime/network
+symbols in `omniroute-native`.
 
 ## Initial baseline (Task 011, measured 2026-09-19)
 

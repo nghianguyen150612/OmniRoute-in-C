@@ -251,3 +251,12 @@ target_link_libraries(test_connection_manager PRIVATE omni_connection_manager om
 omni_apply_native_flags(test_connection_manager)
 add_test(NAME connection-manager-unit COMMAND test_connection_manager)
 set_tests_properties(connection-manager-unit PROPERTIES TIMEOUT 240)
+
+# Bounded listener-to-manager admission (Task 029): fixed caller storage,
+# accepted-FD transfer, manager attach rollback, generation identity, and
+# synchronous release. Loopback-only; production startup remains unchanged.
+add_executable(test_connection_admission test_connection_admission.c)
+target_link_libraries(test_connection_admission PRIVATE omni_connection_admission omni_connection_manager omni_connection_runtime omni_connection_session omni_connection_io omni_connection omni_connection_reactor omni_reactor omni_registry omni_poller omni_event_loop omni_runtime omni_listener omni_recv omni_send omni_accepted omni_bytebuf)
+omni_apply_native_flags(test_connection_admission)
+add_test(NAME connection-admission-unit COMMAND test_connection_admission)
+set_tests_properties(connection-admission-unit PROPERTIES TIMEOUT 300)

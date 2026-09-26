@@ -534,6 +534,38 @@ CLOSING` and is idempotent from `CLOSING`/`CLOSED`; destroy releases both
     `sizeof` values and the capacity formula; all manager operations are fixed
     capacity and allocation-free. The Linux test suite runs 1,000 add/remove
     operations with a process FD census after each operation.
+  - Bounded connection admission implemented (Task 029,
+    `native/src/connection_admission.c`, `omni_connection_admission_*`):
+    admission borrows one live listener and manager, plus a fixed caller-owned
+    slot array and three disjoint caller-owned byte pools for connection
+    receive, session receive, and session send storage. It has no hidden pool,
+    heap allocation, queue, thread, or background activity. Each one-shot call
+    performs at most one accept; drain requires an explicit finite accept
+    attempt limit and caller-owned identity output. The layer transfers the
+    `omni_accepted` FD owner into `omni_connection`, asks the manager to attach
+    session/runtime/reactor state, and publishes slot membership only after
+    that succeeds. Preparation and manager-attach failures clean up through
+    the current FD owner and leave admission count unchanged. Release removes
+    manager/runtime/reactor/session membership before destroying the
+    connection owner; manager generation tokens make stale slot identities
+    fail after reuse. It never destroys the listener or borrowed manager
+    dependencies and does not read/write payloads or run readiness waits.
+    On the current 64-bit Linux ABI, measured sizes are 96 bytes for
+    `struct omni_connection_admission`, 88 bytes for
+    `struct omni_connection_admission_slot`, 112 bytes for
+    `struct omni_connection_admission_config`, and 56 bytes for
+    `struct omni_connection_admission_result`. For capacity `N`, with
+    connection-receive slice `C`, session-receive slice `R`, and session-send
+    slice `S`, the caller reservation is `96 + N * (88 + C + R + S)` bytes.
+    The slot includes the `omni_connection` object; the byte pools, admission
+    array, and admission object are caller-owned storage borrowed by the
+    coordinator. The manager/runtime/session/reactor/poller arrays and their
+    per-connection state are excluded from this admission-only formula. A
+    drain's caller-provided identity output is transient storage of at most
+    `max_attempts * sizeof(struct omni_connection_admission_identity)` and is
+    not retained by the admission object. The focused Linux test reports
+    1,141 checks, zero failures, measured sizes,
+    and 1,000 admit/release cycles with a stable FD census.
 - Caches: global byte budget (e.g. single-digit MiB default on iOS, higher
   on Linux via config), per-cache caps, idle eviction; heavy caches
   (catalog, embeddings) releasable.

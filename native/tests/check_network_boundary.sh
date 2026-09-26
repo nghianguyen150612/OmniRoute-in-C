@@ -1,5 +1,5 @@
 #!/bin/sh
-# Task 028 network source-boundary gate: native networking exists, but ONLY
+# Task 029 network source-boundary gate: native networking exists, but ONLY
 # in the deliberate networking layer (src/listener.c owns socket lifecycle,
 # src/poller.c owns the readiness wait, src/accepted.c owns the accept4
 # drain plus accepted-descriptor lifecycle, src/recv.c owns nonblocking
@@ -25,7 +25,9 @@
 # protocol handling, or heap allocation. The connection manager layer in
 # src/connection_manager.c manages a fixed collection of active runtime
 # attachments without direct socket call, protocol handling, or heap
-# allocation.
+# allocation. The admission coordinator in src/connection_admission.c only
+# composes the existing accept, connection ownership, and manager APIs with
+# fixed caller storage; it performs no direct socket call or heap allocation.
 # Every other production module (arena, bytebuf, meminfo, main, all other
 # headers and sources) must stay socket-free, and the deferred layers — output
 # queues, generic payload read/write, DNS/client, threads, TLS, and protocols —
@@ -187,14 +189,15 @@ fi
 
 # 10. Zero-heap rule for the accept, receive, send, connection, registry,
 # connection/reactor adapter, runtime, event-loop, connection I/O,
-# connection/session, connection runtime binding, and connection manager
+# connection/session, connection runtime binding, connection manager, and
+# connection admission
 # layers: bounded acceptance, bounded drain, single receive, single send,
 # both bounded drains, lifecycle composition, membership bookkeeping,
 # adapter binding, runtime coordination, loop execution, bounded I/O buffer
 # interaction, session coordination, runtime binding, and bounded manager
-# membership perform no heap allocation. Allocator tokens are banned
+# membership/admission coordination perform no heap allocation. Allocator tokens are banned
 # outright (negative control for the
-# Task 016/017/018/019/020/022/025/026/027/028 contracts).
+# Task 016/017/018/019/020/022/025/026/027/028/029 contracts).
 NOHEAP_IN_ACCEPT='\<(malloc|calloc|realloc|free|mmap)\s*\('
 
 HEAP_HITS=$(grep -nE "$NOHEAP_IN_ACCEPT" "$NATIVE_DIR/src/accepted.c" \
@@ -202,9 +205,10 @@ HEAP_HITS=$(grep -nE "$NOHEAP_IN_ACCEPT" "$NATIVE_DIR/src/accepted.c" \
   "$NATIVE_DIR/src/registry.c" "$NATIVE_DIR/src/connection_reactor.c" \
   "$NATIVE_DIR/src/runtime.c" "$NATIVE_DIR/src/event_loop.c" \
   "$NATIVE_DIR/src/connection_io.c" "$NATIVE_DIR/src/connection_session.c" \
-  "$NATIVE_DIR/src/connection_runtime.c" "$NATIVE_DIR/src/connection_manager.c") || true
+  "$NATIVE_DIR/src/connection_runtime.c" "$NATIVE_DIR/src/connection_manager.c" \
+  "$NATIVE_DIR/src/connection_admission.c") || true
 if [ -n "$HEAP_HITS" ]; then
-  echo "FAIL: heap-allocation call in accepted/recv/send/connection/registry/connection_reactor/runtime/event_loop/connection_io/connection_session/connection_runtime/connection_manager production layer (see match above)" >&2
+  echo "FAIL: heap-allocation call in accepted/recv/send/connection/registry/connection_reactor/runtime/event_loop/connection_io/connection_session/connection_runtime/connection_manager/connection_admission production layer (see match above)" >&2
   echo "$HEAP_HITS" >&2
   FAIL=1
 fi
@@ -213,4 +217,4 @@ if [ "$FAIL" -ne 0 ]; then
   exit 1
 fi
 
-echo "OK: networking confined to listener/poller/accepted/recv/send/connection/registry/connection_reactor/connection_io/connection_session/connection_runtime/connection_manager production modules; runtime coordinates lifecycle; event_loop coordinates reactor execution; connection_io owns bounded buffer I/O through recv/send; connection_session coordinates connection+io lifecycle; connection_runtime coordinates event_loop+reactor+session; connection_manager manages bounded runtime membership; send uses MSG_NOSIGNAL; no alternate-loop/scatter/generic-IO/thread/TLS calls; no heap calls in accepted.c, recv.c, send.c, connection.c, registry.c, connection_reactor.c, runtime.c, event_loop.c, connection_io.c, connection_session.c, connection_runtime.c, or connection_manager.c"
+echo "OK: networking confined to listener/poller/accepted/recv/send/connection/registry/connection_reactor/connection_io/connection_session/connection_runtime/connection_manager/connection_admission production modules; runtime coordinates lifecycle; event_loop coordinates reactor execution; connection_io owns bounded buffer I/O through recv/send; connection_session coordinates connection+io lifecycle; connection_runtime coordinates event_loop+reactor+session; connection_manager manages bounded runtime membership; connection_admission coordinates bounded accept and attach; send uses MSG_NOSIGNAL; no alternate-loop/scatter/generic-IO/thread/TLS calls; no heap calls in accepted.c, recv.c, send.c, connection.c, registry.c, connection_reactor.c, runtime.c, event_loop.c, connection_io.c, connection_session.c, connection_runtime.c, connection_manager.c, or connection_admission.c"
