@@ -45,7 +45,7 @@ no `-march=native`, no LTO.
 native/
   README.md                  # this file (build matrix, behavior, baseline)
   CMakeLists.txt             # Linux-first build described above
-  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h, reactor.h, connection_reactor.h, runtime.h, event_loop.h, connection_io.h, connection_session.h, connection_runtime.h
+  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h, reactor.h, connection_reactor.h, runtime.h, event_loop.h, connection_io.h, connection_session.h, connection_runtime.h, connection_manager.h
   src/
     main.c                   # entry point, tiny CLI, lifecycle
     meminfo.c                # Linux /proc/self/status RSS hook (+ stub elsewhere)
@@ -65,8 +65,10 @@ native/
     connection_io.c          # bounded connection I/O state machine (Task 025)
     connection_session.c     # bounded connection/session integration (Task 026)
     connection_runtime.c     # bounded connection runtime binding (Task 027)
+    connection_manager.c     # bounded runtime membership (Task 028)
   tests/
     CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
+    test_connection_manager.c # bounded manager unit, rollback, ownership, and stress checks
     check_network_boundary.sh  # review gate: socket setup confined to src/listener.c,
                               # readiness wait to src/poller.c, accept path plus
                               # accepted-FD lifecycle to src/accepted.c, receive
@@ -75,8 +77,9 @@ native/
                               # src/connection_reactor.c, event-loop
                               # orchestration to src/event_loop.c, connection I/O to
                               # src/connection_io.c, session coordination to
-                              # src/connection_session.c, and runtime binding to
-                              # src/connection_runtime.c; alternate
+                              # src/connection_session.c, runtime binding to
+                              # src/connection_runtime.c, and membership to
+                              # src/connection_manager.c; alternate
                               # loop backends, queues, IO/scatter/TLS are
                               # banned everywhere in production sources, with
                               # heap allocation banned in the bounded native
@@ -1284,6 +1287,77 @@ CLI, network-boundary gate, Tasks 012-026 regression suites, and
 passed the same 25 cases. `npm run check:docs-all` passed its documentation
 gates with only the repository's pre-existing soft count/version/date drift
 warnings.
+
+## Bounded connection manager (Task 028)
+
+Task 028 adds the fixed-capacity membership layer above the Task 027 runtime
+binding (`include/omniroute/connection_manager.h`,
+`src/connection_manager.c`, and `tests/test_connection_manager.c`):
+
+```text
+OPEN connection
+    |
+connection_runtime (session + registry/reactor registration)
+    |
+connection_manager (fixed membership entries + count)
+```
+
+The public lifecycle and membership API is
+`omni_connection_manager_make_inert`, `omni_connection_manager_init`,
+`omni_connection_manager_start`, `omni_connection_manager_stop`,
+`omni_connection_manager_add`, `omni_connection_manager_remove`,
+`omni_connection_manager_find`, `omni_connection_manager_destroy`,
+`omni_connection_manager_state`, `omni_connection_manager_count`, and
+`omni_connection_manager_capacity`. Find returns a read-only view of a live
+manager entry; callers that need FD or session views use the borrowed runtime.
+Initialization borrows a live `omni_connection_runtime` and a caller-provided array of
+`omni_connection_manager_entry` objects with fixed nonzero capacity. There is
+no growth, allocator, map, queue, worker, or production startup wiring.
+
+**State machine**: `NEW -> INITIALIZED -> RUNNING -> STOPPING -> CLOSED`.
+`make_inert` establishes `NEW`; init requires `NEW`. A successful add attaches
+through the runtime first, then publishes the manager entry and count; the
+first successful add promotes `INITIALIZED` to `RUNNING`. Failed add leaves
+manager membership and state unchanged, including runtime-session rollback
+when adapter registration fails. Removing one member detaches through the
+runtime before clearing its entry. Removing the last member returns `RUNNING`
+to `INITIALIZED`; after `STOPPING`, remove remains available while add is
+rejected. Destroy detaches every member and reaches `CLOSED` idempotently.
+
+**Ownership and identity**: the manager owns only bookkeeping in its fixed
+entry array and its membership count. It borrows the runtime, caller backing
+array, connections, and session receive/send backing. The runtime continues to
+own session and I/O lifecycle; registry/reactor registration is delegated via
+the runtime. The manager never closes a descriptor, destroys an accepted
+owner, frees a connection, destroys the registry/reactor/event loop, runs the
+loop, reads or writes payload bytes, or parses protocols. Each manager entry
+stores the connection pointer, the existing registry/reactor token, and an
+occupied flag. Slot reuse receives the registry's next generation token, so a
+stale token cannot resolve to the new connection.
+
+**Measured manager memory**: on the current 64-bit Linux ABI,
+`sizeof(struct omni_connection_manager)` is 40 bytes,
+`sizeof(struct omni_connection_manager_entry)` is 24 bytes, and
+`sizeof(struct omni_connection_manager_config)` is 24 bytes, measured by the
+focused native test. For manager capacity `N`, the manager object and its
+caller-provided membership array reserve exactly
+`40 + N * 24` bytes on this ABI. The runtime entries, sessions, and caller
+receive/send buffers are separate borrowed/runtime storage and are not added
+to this manager-only formula. No per-add allocation occurs.
+
+Task 028 validation covers lifecycle and invalid operations, full capacity,
+duplicate and missing membership, rollback after runtime session setup reaches
+a duplicate adapter registration, generation-safe slot reuse, one- and
+multiple-connection destruction, borrowed descriptor/registry/reactor/event-loop
+preservation, 1,000 deterministic add/remove operations with a stable Linux FD
+census, and measured-size/formula checks. The focused manager suite reports
+420 checks with zero failures. GCC Debug, GCC Release, Clang Debug, Clang
+Release, GCC ASan+UBSan Debug, and Clang ASan+UBSan Debug all built
+warning-clean and passed all 26 CTest cases, including the CLI,
+network-boundary gate, Tasks 012-027 regressions, and
+`connection-manager-unit`. `npm run check:docs-all` passed; it reported
+the repository's existing soft count/version/date drift warnings, with no
+documentation check failures.
 
 ## Initial baseline (Task 011, measured 2026-09-19)
 

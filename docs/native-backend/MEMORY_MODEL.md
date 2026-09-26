@@ -514,6 +514,26 @@ CLOSING` and is idempotent from `CLOSING`/`CLOSED`; destroy releases both
       accounted for, plus the 56-byte runtime object itself. No per-attach heap,
       no dynamic map, no queue. Protocols, parsers, timers, threads, and
       production startup wiring remain deferred.
+  - Bounded connection manager implemented (Task 028,
+    `native/src/connection_manager.c`, `omni_connection_manager_*`): the
+    manager borrows one live `omni_connection_runtime` and a fixed caller-owned
+    `omni_connection_manager_entry` array. Each entry contains only a borrowed
+    connection pointer, the runtime's registry/reactor generation token, and an
+    occupied flag. The manager publishes membership only after runtime attach
+    succeeds; remove and destroy delegate detach to the runtime before clearing
+    manager entries. It never closes descriptors, destroys accepted owners,
+    frees connections, owns sessions, allocates, grows, creates maps or queues,
+    or runs the event loop. On the current 64-bit Linux ABI, measured sizes are
+    40 bytes for `struct omni_connection_manager`, 24 bytes for
+    `struct omni_connection_manager_entry`, and 24 bytes for
+    `struct omni_connection_manager_config`. For capacity `N`, manager-only
+    storage is exactly `40 + N * 24` bytes in this ABI: one manager object and
+    the caller-provided entry array. Runtime entry/session storage and
+    receive/send backing are separately accounted for and excluded from this
+    manager-only formula. The focused Task 028 test verifies these measured
+    `sizeof` values and the capacity formula; all manager operations are fixed
+    capacity and allocation-free. The Linux test suite runs 1,000 add/remove
+    operations with a process FD census after each operation.
 - Caches: global byte budget (e.g. single-digit MiB default on iOS, higher
   on Linux via config), per-cache caps, idle eviction; heavy caches
   (catalog, embeddings) releasable.

@@ -9,7 +9,9 @@
 #define _GNU_SOURCE
 
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <stdbool.h>
@@ -43,6 +45,8 @@
 #define POLLER_CAP 8u
 #define RT_CAP 4u
 #define MGR_CAP 4u
+#define MANAGER_STRESS_CYCLES 500u
+#define MULTI_ACTIVE_CAP 3u
 
 static int check_count = 0;
 static int failure_count = 0;
@@ -131,13 +135,23 @@ struct test_manager_env {
   struct omni_connection_reactor adapter;
   struct omni_runtime runtime;
   struct omni_event_loop loop;
+  struct omni_listener loop_listener;
+  struct omni_connection_registry loop_registry;
+  struct omni_reactor loop_reactor;
+  struct pollfd loop_pfds[POLLER_CAP];
+  uint64_t loop_ptokens[POLLER_CAP];
+  struct omni_connection_registry_slot loop_rslots[REG_CAP];
+  struct omni_reactor_registration loop_rregs[REACTOR_CAP];
+  struct omni_poller_event loop_events[REACTOR_CAP];
   struct omni_connection_runtime crt;
   struct omni_connection_runtime_entry rt_entries[RT_CAP];
   struct omni_connection_manager mgr;
   struct omni_connection_manager_entry mgr_entries[MGR_CAP];
 };
 
-static bool init_env(struct test_manager_env *env) {
+static bool init_env_internal(struct test_manager_env *env, bool with_event_loop) {
+  struct omni_runtime_config runtime_cfg = {0};
+  struct omni_event_loop_config loop_cfg = {0};
   struct omni_connection_runtime_config rcfg = {0};
   struct omni_connection_manager_config mcfg = {0};
   memset(env, 0, sizeof(*env));
@@ -155,11 +169,33 @@ static bool init_env(struct test_manager_env *env) {
 
   omni_runtime_make_inert(&env->runtime);
   omni_event_loop_make_inert(&env->loop);
+  if (with_event_loop) {
+    omni_listener_make_inert(&env->loop_listener);
+    omni_connection_registry_make_inert(&env->loop_registry);
+    omni_reactor_make_inert(&env->loop_reactor);
+    runtime_cfg.listener = &env->loop_listener;
+    runtime_cfg.registry = &env->loop_registry;
+    runtime_cfg.reactor = &env->loop_reactor;
+    runtime_cfg.registry_slots = env->loop_rslots;
+    runtime_cfg.registry_capacity = REG_CAP;
+    runtime_cfg.poller_fds = env->loop_pfds;
+    runtime_cfg.poller_tokens = env->loop_ptokens;
+    runtime_cfg.poller_capacity = POLLER_CAP;
+    runtime_cfg.reactor_registrations = env->loop_rregs;
+    runtime_cfg.reactor_events = env->loop_events;
+    runtime_cfg.reactor_capacity = REACTOR_CAP;
+    runtime_cfg.listener_address = "127.0.0.1";
+    runtime_cfg.listener_port = 0u;
+    if (omni_runtime_init(&env->runtime, &runtime_cfg).status != OMNI_RUNTIME_OK) return false;
+    loop_cfg.runtime = &env->runtime;
+    loop_cfg.timeout_ms = 0;
+    if (omni_event_loop_init(&env->loop, &loop_cfg).status != OMNI_EVENT_LOOP_OK) return false;
+  }
 
   omni_connection_runtime_make_inert(&env->crt);
   rcfg.registry=&env->registry;
   rcfg.adapter=&env->adapter;
-  rcfg.event_loop=NULL;
+  rcfg.event_loop=with_event_loop ? &env->loop : NULL;
   rcfg.entries=env->rt_entries;
   rcfg.capacity=RT_CAP;
   if (omni_connection_runtime_init(&env->crt, &rcfg).status != OMNI_CONNECTION_RUNTIME_OK) return false;
@@ -170,6 +206,14 @@ static bool init_env(struct test_manager_env *env) {
   mcfg.capacity=MGR_CAP;
   if (omni_connection_manager_init(&env->mgr, &mcfg).status != OMNI_CONNECTION_MANAGER_OK) return false;
   return true;
+}
+
+static bool init_env(struct test_manager_env *env) {
+  return init_env_internal(env, false);
+}
+
+static bool init_env_with_event_loop(struct test_manager_env *env) {
+  return init_env_internal(env, true);
 }
 
 static void cleanup_env(struct test_manager_env *env) {
@@ -183,6 +227,25 @@ static void cleanup_env(struct test_manager_env *env) {
   omni_poller_destroy(&env->poller);
 }
 
+static bool fd_is_open(int fd) {
+  if (fd < 0) return false;
+  errno = 0;
+  return fcntl(fd, F_GETFD) != -1 || errno != EBADF;
+}
+
+/* Linux test-only process-wide descriptor census; subtract opendir's own FD. */
+static int fd_census(void) {
+  DIR *directory = opendir("/proc/self/fd");
+  struct dirent *entry = NULL;
+  int count = 0;
+  if (directory == NULL) return -1;
+  while ((entry = readdir(directory)) != NULL) {
+    if (entry->d_name[0] != '.') count += 1;
+  }
+  if (closedir(directory) != 0 || count == 0) return -1;
+  return count - 1;
+}
+
 /* ---------- tests ---------- */
 
 static void test_inert_state(void) {
@@ -194,7 +257,6 @@ static void test_inert_state(void) {
   check(omni_connection_manager_state(&mgr)==OMNI_CONNECTION_MANAGER_NEW, "state NEW manager");
   check(omni_connection_manager_count(&mgr)==0u, "count 0 on NEW manager");
   check(omni_connection_manager_capacity(&mgr)==0u, "capacity 0 on NEW manager");
-  check(!omni_connection_manager_is_initialized(&mgr), "not initialized on NEW manager");
   check(omni_connection_manager_state(NULL)==OMNI_CONNECTION_MANAGER_NEW, "state NULL->NEW manager");
   check(omni_connection_manager_count(NULL)==0u, "count NULL 0 manager");
   omni_connection_manager_destroy(&mgr);
@@ -213,16 +275,25 @@ static void test_inert_state(void) {
 static void test_valid_init(void) {
   struct test_manager_env env;
   if (!init_env(&env)) { check(false,"env init for valid_init manager"); return; }
-  check(env.mgr.state==OMNI_CONNECTION_MANAGER_INITIALIZED, "manager init -> INITIALIZED");
-  check(omni_connection_manager_is_initialized(&env.mgr), "manager is_initialized true");
+  check(omni_connection_manager_state(&env.mgr) == OMNI_CONNECTION_MANAGER_INITIALIZED,
+        "manager state reports initialized");
   check(omni_connection_manager_capacity(&env.mgr)==MGR_CAP, "manager capacity MGR_CAP");
   check(omni_connection_manager_count(&env.mgr)==0u, "manager count 0 after init");
-  check(omni_connection_manager_state(&env.mgr)==OMNI_CONNECTION_MANAGER_INITIALIZED, "state INITIALIZED");
+  struct omni_connection missing = {0};
+  size_t count_before_find = omni_connection_manager_count(&env.mgr);
+  enum omni_connection_manager_state state_before_find = omni_connection_manager_state(&env.mgr);
+  check(omni_connection_manager_find(&env.mgr, NULL) == NULL, "find NULL connection returns NULL");
+  check(omni_connection_manager_find(NULL, &missing) == NULL, "find NULL manager returns NULL");
+  check(omni_connection_manager_find(&env.mgr, &missing) == NULL, "find missing connection returns NULL");
+  check(omni_connection_manager_count(&env.mgr) == count_before_find,
+        "find does not change manager count");
+  check(omni_connection_manager_state(&env.mgr) == state_before_find,
+        "find does not change manager state");
   /* start transition */
   struct omni_connection_manager_result sr = omni_connection_manager_start(&env.mgr);
   check(sr.status==OMNI_CONNECTION_MANAGER_OK, "start INITIALIZED->RUNNING");
-  check(env.mgr.state==OMNI_CONNECTION_MANAGER_RUNNING, "state RUNNING after start");
-  check(omni_connection_manager_is_running(&env.mgr), "is_running true");
+  check(omni_connection_manager_state(&env.mgr) == OMNI_CONNECTION_MANAGER_RUNNING,
+        "manager state reports running");
   /* stop */
   sr = omni_connection_manager_stop(&env.mgr);
   check(sr.status==OMNI_CONNECTION_MANAGER_OK, "stop RUNNING->STOPPING");
@@ -329,11 +400,18 @@ static void test_add_remove_success(void) {
   check(omni_connection_manager_count(&env.mgr)==1u, "manager count 1 after add");
   check(env.mgr.state==OMNI_CONNECTION_MANAGER_RUNNING, "manager state RUNNING after add");
   check(omni_connection_manager_capacity(&env.mgr)==MGR_CAP, "manager capacity MGR_CAP");
-  struct omni_connection_manager_entry *e = omni_connection_manager_find(&env.mgr,&conn);
+  const struct omni_connection_manager_entry *e = omni_connection_manager_find(&env.mgr,&conn);
   check(e!=NULL, "manager find returns non-NULL");
   check(e->token==r.token, "entry token matches");
-  check(omni_connection_manager_fd(&env.mgr,&conn)>=0, "manager fd valid after add");
-  check(omni_connection_manager_find_session(&env.mgr,&conn)!=NULL, "manager session found");
+  size_t count_before_lookup = omni_connection_manager_count(&env.mgr);
+  enum omni_connection_manager_state state_before_lookup = omni_connection_manager_state(&env.mgr);
+  (void)omni_connection_manager_find(&env.mgr, &conn);
+  check(omni_connection_manager_count(&env.mgr) == count_before_lookup &&
+            omni_connection_manager_state(&env.mgr) == state_before_lookup,
+        "find of live connection does not mutate manager state");
+  check(omni_connection_runtime_fd(&env.crt,&conn)>=0, "runtime fd valid after manager add");
+  check(omni_connection_runtime_find_session(&env.crt,&conn)!=NULL,
+        "runtime session found after manager add");
   check(omni_connection_reactor_count(&env.adapter)==1u, "reactor count 1 manager add");
   check(omni_connection_registry_count(&env.registry)==1u, "registry count 1 manager add");
   check(omni_connection_runtime_count(&env.crt)==1u, "runtime count 1 manager add");
@@ -351,8 +429,14 @@ static void test_add_remove_success(void) {
   check(omni_connection_fd(&conn)>=0, "connection fd still valid after manager remove");
 
   /* Remove again not found */
+  size_t count_before_missing_remove = omni_connection_manager_count(&env.mgr);
+  enum omni_connection_manager_state state_before_missing_remove =
+      omni_connection_manager_state(&env.mgr);
   r = omni_connection_manager_remove(&env.mgr,&conn);
   check(r.status==OMNI_CONNECTION_MANAGER_ERR_NOT_FOUND, "second manager remove NOT_FOUND");
+  check(omni_connection_manager_count(&env.mgr) == count_before_missing_remove &&
+            omni_connection_manager_state(&env.mgr) == state_before_missing_remove,
+        "missing manager remove leaves state and count unchanged");
 
   omni_connection_destroy(&conn);
   omni_accepted_destroy(&accepted);
@@ -424,6 +508,16 @@ static void test_capacity_full(void) {
   check(omni_connection_runtime_count(&env.crt)==MGR_CAP, "runtime count == capacity after fills manager");
   enum omni_connection_manager_state state_before = omni_connection_manager_state(&env.mgr);
   size_t count_before = omni_connection_manager_count(&env.mgr);
+  struct omni_connection_manager_attach_config duplicate_ac = {
+    &conns[0], srs[0], SESS_RECV_CAP, sss[0], SESS_SEND_CAP
+  };
+  struct omni_connection_manager_result duplicate_full =
+      omni_connection_manager_add(&env.mgr, &duplicate_ac);
+  check(duplicate_full.status == OMNI_CONNECTION_MANAGER_ERR_DUPLICATE,
+        "duplicate remains DUPLICATE when manager is full");
+  check(omni_connection_manager_count(&env.mgr) == count_before &&
+            omni_connection_manager_state(&env.mgr) == state_before,
+        "duplicate at capacity leaves manager unchanged");
   /* one more should be FULL */
   cfs[MGR_CAP]=open_client(port);
   if (cfs[MGR_CAP]!=-1) {
@@ -438,8 +532,17 @@ static void test_capacity_full(void) {
     check(false, "manager capacity full bystander client");
   }
 
+  const size_t count_before_one_remove = omni_connection_manager_count(&env.mgr);
+  check(omni_connection_manager_remove(&env.mgr, &conns[0]).status ==
+            OMNI_CONNECTION_MANAGER_OK,
+        "remove one connection from full manager");
+  check(omni_connection_manager_count(&env.mgr) == count_before_one_remove - 1u &&
+            omni_connection_manager_find(&env.mgr, &conns[1]) != NULL &&
+            omni_connection_manager_find(&env.mgr, &conns[MGR_CAP - 1u]) != NULL,
+        "removing one connection preserves the other memberships");
+
   /* cleanup */
-  for (i=0;i<MGR_CAP;++i) {
+  for (i=1u;i<MGR_CAP;++i) {
     omni_connection_manager_remove(&env.mgr,&conns[i]);
   }
   check(omni_connection_manager_count(&env.mgr)==0u, "manager all detached count 0 capacity full");
@@ -470,7 +573,7 @@ static void test_stale_slot_reuse(void) {
   uint64_t tok1=r1.token;
   check(tok1!=0u, "manager token1 non-zero");
   /* also check runtime token matches */
-  struct omni_connection_manager_entry *e1 = omni_connection_manager_find(&env.mgr,&c1);
+  const struct omni_connection_manager_entry *e1 = omni_connection_manager_find(&env.mgr,&c1);
   check(e1!=NULL && e1->token==tok1, "manager entry token matches");
 
   /* remove c1, token should become stale */
@@ -484,6 +587,8 @@ static void test_stale_slot_reuse(void) {
   struct omni_connection_manager_result r2 = omni_connection_manager_add(&env.mgr,&ac2);
   check(r2.status==OMNI_CONNECTION_MANAGER_OK, "manager attach c2 after stale");
   check(r2.token!=tok1, "manager new token != stale token");
+  const struct omni_connection_manager_entry *e2 = omni_connection_manager_find(&env.mgr,&c2);
+  check(e2 == e1, "manager reuses the same slot for the new connection");
 
   /* remove c2, slot reusable again */
   omni_connection_manager_remove(&env.mgr,&c2);
@@ -531,9 +636,121 @@ static void test_destroy_cleanup(void) {
   /* idempotent */
   omni_connection_manager_destroy(&env.mgr);
   check(omni_connection_manager_state(&env.mgr)==OMNI_CONNECTION_MANAGER_CLOSED, "double destroy stays CLOSED manager");
+  struct omni_connection_manager_attach_config closed_attach = {0};
+  check(omni_connection_manager_add(&env.mgr, &closed_attach).status == OMNI_CONNECTION_MANAGER_ERR_STATE,
+        "closed manager rejects add");
+  check(omni_connection_manager_remove(&env.mgr, &c).status == OMNI_CONNECTION_MANAGER_ERR_STATE,
+        "closed manager rejects remove");
+  check(omni_connection_manager_start(&env.mgr).status == OMNI_CONNECTION_MANAGER_ERR_STATE,
+        "closed manager rejects start");
+  check(omni_connection_manager_stop(&env.mgr).status == OMNI_CONNECTION_MANAGER_ERR_STATE,
+        "closed manager rejects stop");
   omni_connection_destroy(&c);
   omni_accepted_destroy(&a);
   if (cf!=-1) close(cf);
+  omni_listener_destroy(&listener);
+  cleanup_env(&env);
+}
+
+static void test_destroy_multiple_active(void) {
+  struct test_manager_env env;
+  struct omni_listener listener={0};
+  struct omni_accepted accepted[MULTI_ACTIVE_CAP];
+  struct omni_connection connections[MULTI_ACTIVE_CAP];
+  unsigned char connection_storage[MULTI_ACTIVE_CAP][CONN_RECV_CAP];
+  unsigned char receive_storage[MULTI_ACTIVE_CAP][SESS_RECV_CAP];
+  unsigned char send_storage[MULTI_ACTIVE_CAP][SESS_SEND_CAP];
+  int client_fds[MULTI_ACTIVE_CAP];
+  int connection_fds[MULTI_ACTIVE_CAP];
+  uint16_t port=0;
+  size_t prepared=0u;
+
+  for (size_t i=0u; i<MULTI_ACTIVE_CAP; ++i) {
+    client_fds[i] = -1;
+    connection_fds[i] = OMNI_ACCEPTED_FD_INVALID;
+    omni_accepted_make_inert(&accepted[i]);
+    omni_connection_make_inert(&connections[i]);
+  }
+  if (!init_env_with_event_loop(&env)) {
+    check(false, "manager env with live borrowed event loop initializes");
+    return;
+  }
+  if (!start_listener(&listener, &port)) {
+    cleanup_env(&env);
+    return;
+  }
+
+  for (size_t i=0u; i<MULTI_ACTIVE_CAP; ++i) {
+    client_fds[i] = open_client(port);
+    if (client_fds[i] < 0 || !accept_one(&listener, &accepted[i]) ||
+        !make_open_connection(&connections[i], connection_storage[i],
+                              CONN_RECV_CAP, &accepted[i])) {
+      break;
+    }
+    connection_fds[i] = omni_connection_fd(&connections[i]);
+    struct omni_connection_manager_attach_config attach = {
+      &connections[i], receive_storage[i], SESS_RECV_CAP,
+      send_storage[i], SESS_SEND_CAP
+    };
+    if (omni_connection_manager_add(&env.mgr, &attach).status != OMNI_CONNECTION_MANAGER_OK) {
+      break;
+    }
+    prepared += 1u;
+  }
+
+  check(prepared == MULTI_ACTIVE_CAP, "multiple manager connections active before destroy");
+  check(omni_connection_manager_count(&env.mgr) == prepared,
+        "manager count tracks multiple active connections");
+  check(omni_connection_runtime_count(&env.crt) == prepared,
+        "runtime tracks multiple active manager connections");
+  check(omni_connection_reactor_count(&env.adapter) == prepared,
+        "reactor has multiple manager registrations before destroy");
+  check(env.loop.state == OMNI_EVENT_LOOP_INITIALIZED &&
+            env.runtime.state == OMNI_RUNTIME_INITIALIZED,
+        "borrowed event loop and runtime valid before manager destroy");
+
+  omni_connection_manager_destroy(&env.mgr);
+  check(omni_connection_manager_state(&env.mgr) == OMNI_CONNECTION_MANAGER_CLOSED,
+        "multi-connection manager destroy reaches CLOSED");
+  check(omni_connection_manager_count(&env.mgr) == 0u,
+        "multi-connection manager count cleared");
+  check(omni_connection_reactor_count(&env.adapter) == 0u,
+        "all multi-connection reactor registrations removed");
+  check(omni_connection_registry_count(&env.registry) == 0u,
+        "all multi-connection registry entries removed");
+  check(omni_connection_runtime_count(&env.crt) == 0u,
+        "all multi-connection runtime sessions released");
+  check(env.registry.live && env.adapter.live,
+        "borrowed registry and adapter remain live");
+  check(env.reactor.live && env.poller.live,
+        "borrowed reactor and poller remain live");
+  for (size_t i=0u; i<MGR_CAP; ++i) {
+    check(!env.mgr_entries[i].occupied && env.mgr_entries[i].connection == NULL &&
+              env.mgr_entries[i].token == 0u,
+          "manager destroy clears caller-owned membership entries");
+  }
+  check(env.loop.state == OMNI_EVENT_LOOP_INITIALIZED && env.loop.runtime == &env.runtime &&
+            env.runtime.state == OMNI_RUNTIME_INITIALIZED &&
+            omni_listener_fd(&env.loop_listener) >= 0,
+        "borrowed event loop and runtime remain live after manager destroy");
+
+  for (size_t i=0u; i<prepared; ++i) {
+    check(omni_connection_is_live(&connections[i]), "external connection remains live after destroy");
+    check(omni_connection_fd(&connections[i]) == connection_fds[i] &&
+              fd_is_open(connection_fds[i]),
+          "external connection descriptor remains open after destroy");
+    check(connections[i].accepted.live && connections[i].accepted.fd == connection_fds[i],
+          "accepted owner remains with caller connection");
+    check(fd_is_open(client_fds[i]), "external client descriptor remains open after destroy");
+    check(!accepted[i].live && omni_accepted_fd(&accepted[i]) == OMNI_ACCEPTED_FD_INVALID,
+          "moved accepted source remains inert after manager destroy");
+  }
+
+  for (size_t i=0u; i<MULTI_ACTIVE_CAP; ++i) {
+    omni_connection_destroy(&connections[i]);
+    omni_accepted_destroy(&accepted[i]);
+    if (client_fds[i] >= 0) (void)close(client_fds[i]);
+  }
   omni_listener_destroy(&listener);
   cleanup_env(&env);
 }
@@ -552,12 +769,13 @@ static void test_runtime_detach(void) {
   struct omni_connection_manager_attach_config ac={&c,sr,SESS_RECV_CAP,ss,SESS_SEND_CAP};
   omni_connection_manager_add(&env.mgr,&ac);
   check(omni_connection_runtime_count(&env.crt)==1u, "runtime 1 after manager add runtime_detach test");
-  struct omni_connection_session *sess = omni_connection_manager_find_session(&env.mgr,&c);
+  struct omni_connection_session *sess = omni_connection_runtime_find_session(&env.crt,&c);
   check(sess!=NULL && omni_connection_session_is_open(sess), "manager session OPEN runtime_detach");
   /* manager remove should delegate to runtime detach */
   omni_connection_manager_remove(&env.mgr,&c);
   check(omni_connection_runtime_count(&env.crt)==0u, "runtime 0 after manager remove runtime_detach");
-  check(omni_connection_manager_find_session(&env.mgr,&c)==NULL, "manager session gone after remove");
+  check(omni_connection_manager_find(&env.mgr,&c)==NULL,
+        "manager membership gone after remove");
   check(omni_connection_runtime_find_session(&env.crt,&c)==NULL, "runtime session gone after manager remove");
   omni_connection_destroy(&c);
   omni_accepted_destroy(&a);
@@ -612,7 +830,8 @@ static void test_descriptor_preservation(void) {
   omni_connection_manager_add(&env.mgr,&ac);
   check(omni_listener_fd(&listener)==lfd_before, "manager listener fd preserved after add");
   check(omni_connection_fd(&conn)==cfd_before, "manager conn fd preserved after add");
-  check(omni_connection_manager_fd(&env.mgr,&conn)==cfd_before, "manager fd view matches");
+  check(omni_connection_runtime_fd(&env.crt,&conn)==cfd_before,
+        "runtime fd view matches after manager add");
 
   omni_connection_manager_remove(&env.mgr,&conn);
   check(omni_listener_fd(&listener)==lfd_before, "manager listener fd preserved after remove");
@@ -690,9 +909,9 @@ static void test_repeated_cycles(void) {
     struct omni_connection_manager_result rr = omni_connection_manager_add(&env.mgr,&ac);
     check(rr.status==OMNI_CONNECTION_MANAGER_OK, "manager cycle add ok");
     client_send_all(cf,(unsigned char*)"x",1);
-    struct omni_connection_manager_entry *e = omni_connection_manager_find(&env.mgr,&c);
+    const struct omni_connection_manager_entry *e = omni_connection_manager_find(&env.mgr,&c);
     if (e) {
-      struct omni_connection_session *sess = omni_connection_manager_find_session(&env.mgr,&c);
+      struct omni_connection_session *sess = omni_connection_runtime_find_session(&env.crt,&c);
       if (sess) { (void)omni_connection_session_readable(sess); struct omni_bytebuf *sb=omni_connection_session_send_buffer(sess); if (sb) { omni_bytebuf_append(sb,(unsigned char*)"y",1); (void)omni_connection_session_writable(sess); } }
     }
     rr = omni_connection_manager_remove(&env.mgr,&c);
@@ -705,6 +924,100 @@ static void test_repeated_cycles(void) {
   check(omni_connection_manager_count(&env.mgr)==0u, "manager count 0 after cycles");
   check(omni_connection_reactor_count(&env.adapter)==0u, "manager reactor 0 after cycles");
   check(omni_connection_runtime_count(&env.crt)==0u, "manager runtime 0 after cycles");
+  omni_listener_destroy(&listener);
+  cleanup_env(&env);
+}
+
+static void test_thousand_operation_stress(void) {
+  struct test_manager_env env;
+  struct omni_listener listener={0};
+  struct omni_accepted accepted={0};
+  struct omni_connection connection={0};
+  unsigned char connection_storage[CONN_RECV_CAP];
+  unsigned char receive_storage[SESS_RECV_CAP];
+  unsigned char send_storage[SESS_SEND_CAP];
+  uint16_t port=0;
+  int client_fd=-1;
+  int baseline_fds=-1;
+  size_t operations=0u;
+  bool stable=true;
+
+  if (!init_env(&env)) return;
+  if (!start_listener(&listener, &port)) { cleanup_env(&env); return; }
+  client_fd = open_client(port);
+  if (client_fd < 0 || !accept_one(&listener, &accepted) ||
+      !make_open_connection(&connection, connection_storage, CONN_RECV_CAP, &accepted)) {
+    if (client_fd >= 0) (void)close(client_fd);
+    omni_listener_destroy(&listener);
+    cleanup_env(&env);
+    return;
+  }
+
+  baseline_fds = fd_census();
+  if (baseline_fds < 0) {
+    check(false, "FD census available for manager stress");
+    omni_connection_destroy(&connection);
+    omni_accepted_destroy(&accepted);
+    (void)close(client_fd);
+    omni_listener_destroy(&listener);
+    cleanup_env(&env);
+    return;
+  }
+
+  struct omni_connection_manager_attach_config attach = {
+    &connection, receive_storage, SESS_RECV_CAP, send_storage, SESS_SEND_CAP
+  };
+  for (size_t cycle=0u; cycle<MANAGER_STRESS_CYCLES && stable; ++cycle) {
+    struct omni_connection_manager_result added =
+        omni_connection_manager_add(&env.mgr, &attach);
+    if (added.status != OMNI_CONNECTION_MANAGER_OK) {
+      fprintf(stderr, "stress add failed at cycle %zu with status %d\n",
+              cycle, (int)added.status);
+      stable = false;
+      break;
+    }
+    operations += 1u;
+    if (omni_connection_manager_count(&env.mgr) >
+            omni_connection_manager_capacity(&env.mgr) ||
+        omni_connection_manager_count(&env.mgr) != 1u || fd_census() != baseline_fds) {
+      fprintf(stderr, "manager bound or FD census changed after add at cycle %zu\n", cycle);
+      stable = false;
+      break;
+    }
+
+    struct omni_connection_manager_result removed =
+        omni_connection_manager_remove(&env.mgr, &connection);
+    if (removed.status != OMNI_CONNECTION_MANAGER_OK) {
+      fprintf(stderr, "stress remove failed at cycle %zu with status %d\n",
+              cycle, (int)removed.status);
+      stable = false;
+      break;
+    }
+    operations += 1u;
+    if (omni_connection_manager_count(&env.mgr) >
+            omni_connection_manager_capacity(&env.mgr) ||
+        omni_connection_manager_count(&env.mgr) != 0u || fd_census() != baseline_fds) {
+      fprintf(stderr, "manager bound or FD census changed after remove at cycle %zu\n", cycle);
+      stable = false;
+      break;
+    }
+  }
+
+  check(stable && operations >= 1000u,
+        "1000 manager add/remove operations keep capacity and FD census stable");
+  check(omni_connection_manager_count(&env.mgr) == 0u &&
+            omni_connection_runtime_count(&env.crt) == 0u &&
+            omni_connection_reactor_count(&env.adapter) == 0u,
+        "manager stress ends with no live membership or registration");
+  check(omni_connection_is_live(&connection) && fd_is_open(omni_connection_fd(&connection)) &&
+            fd_is_open(client_fd),
+        "manager stress preserves caller-owned connection and client descriptors");
+  if (omni_connection_manager_find(&env.mgr, &connection) != NULL) {
+    (void)omni_connection_manager_remove(&env.mgr, &connection);
+  }
+  omni_connection_destroy(&connection);
+  omni_accepted_destroy(&accepted);
+  (void)close(client_fd);
   omni_listener_destroy(&listener);
   cleanup_env(&env);
 }
@@ -806,13 +1119,97 @@ static void test_failed_add_unchanged(void) {
   cleanup_env(&env);
 }
 
+static void test_failed_runtime_attach_rollback(void) {
+  struct test_manager_env env;
+  struct omni_listener listener={0};
+  struct omni_accepted accepted={0};
+  struct omni_connection connection={0};
+  unsigned char connection_storage[CONN_RECV_CAP];
+  unsigned char receive_storage[SESS_RECV_CAP];
+  unsigned char send_storage[SESS_SEND_CAP];
+  uint16_t port=0;
+  int client_fd=-1;
+  uint64_t external_token=0u;
+
+  if (!init_env(&env)) return;
+  if (!start_listener(&listener, &port)) { cleanup_env(&env); return; }
+  client_fd = open_client(port);
+  if (client_fd < 0 || !accept_one(&listener, &accepted) ||
+      !make_open_connection(&connection, connection_storage, CONN_RECV_CAP, &accepted)) {
+    if (client_fd >= 0) (void)close(client_fd);
+    omni_listener_destroy(&listener);
+    cleanup_env(&env);
+    return;
+  }
+
+  /* Force runtime attach to reach session setup, then fail on adapter duplicate. */
+  struct omni_connection_reactor_result external =
+      omni_connection_reactor_attach(&env.adapter, &connection);
+  external_token = external.token;
+  check(external.status == OMNI_CONNECTION_REACTOR_OK && external_token != 0u,
+        "external registration created for runtime rollback test");
+  if (external.status != OMNI_CONNECTION_REACTOR_OK || external_token == 0u) {
+    omni_connection_destroy(&connection);
+    omni_accepted_destroy(&accepted);
+    (void)close(client_fd);
+    omni_listener_destroy(&listener);
+    cleanup_env(&env);
+    return;
+  }
+  struct omni_connection_manager_attach_config attach = {
+    &connection, receive_storage, SESS_RECV_CAP, send_storage, SESS_SEND_CAP
+  };
+  const size_t count_before = omni_connection_manager_count(&env.mgr);
+  const enum omni_connection_manager_state state_before =
+      omni_connection_manager_state(&env.mgr);
+  struct omni_connection_manager_result result =
+      omni_connection_manager_add(&env.mgr, &attach);
+  check(result.status == OMNI_CONNECTION_MANAGER_ERR_DUPLICATE,
+        "adapter duplicate reports failed manager attach");
+  check(omni_connection_manager_count(&env.mgr) == count_before &&
+            omni_connection_manager_state(&env.mgr) == state_before,
+        "failed runtime attach leaves manager state and count unchanged");
+  check(omni_connection_manager_find(&env.mgr, &connection) == NULL &&
+            omni_connection_runtime_find_session(&env.crt, &connection) == NULL,
+        "failed runtime attach publishes no manager membership or session");
+  check(omni_connection_runtime_count(&env.crt) == 0u &&
+            !env.rt_entries[0].occupied && env.rt_entries[0].connection == NULL &&
+            omni_connection_session_state(&env.rt_entries[0].session) ==
+                OMNI_CONNECTION_SESSION_NEW,
+        "failed runtime attach rolls back its session and runtime slot");
+  check(omni_connection_reactor_count(&env.adapter) == 1u &&
+            omni_connection_registry_count(&env.registry) == 1u,
+        "rollback preserves the pre-existing external registration");
+  check(omni_connection_reactor_dispatch(&env.adapter, external_token,
+                                         OMNI_POLLER_INTEREST_READ).status ==
+            OMNI_CONNECTION_REACTOR_OK,
+        "pre-existing external token remains live after rollback");
+
+  check(omni_connection_reactor_detach(&env.adapter, &connection).status ==
+            OMNI_CONNECTION_REACTOR_OK,
+        "external registration detached after rollback assertions");
+  check(omni_connection_manager_count(&env.mgr) == 0u &&
+            omni_connection_runtime_count(&env.crt) == 0u &&
+            omni_connection_reactor_count(&env.adapter) == 0u,
+        "rollback cleanup leaves all membership counts zero");
+  omni_connection_destroy(&connection);
+  omni_accepted_destroy(&accepted);
+  (void)close(client_fd);
+  omni_listener_destroy(&listener);
+  cleanup_env(&env);
+}
+
 static void test_memory_size(void) {
   struct omni_connection_manager mgr={0};
-  printf("# sizeof(manager)=%zu # sizeof(entry)=%zu # sizeof(session)=%zu # sizeof(runtime)=%zu\n",
-    sizeof(mgr), sizeof(struct omni_connection_manager_entry), sizeof(struct omni_connection_session), sizeof(struct omni_connection_runtime));
+  printf("# sizeof(manager)=%zu # sizeof(manager_entry)=%zu # sizeof(config)=%zu\n",
+         sizeof(mgr), sizeof(struct omni_connection_manager_entry),
+         sizeof(struct omni_connection_manager_config));
   check(sizeof(mgr)>0 && sizeof(mgr)<1024, "manager size bounded <1K");
   check(sizeof(struct omni_connection_manager_entry) < 64, "manager entry small <64");
   check(sizeof(struct omni_connection_manager_entry) >= sizeof(void*)+sizeof(uint64_t), "manager entry contains connection+token");
+  check(sizeof(struct omni_connection_manager_config) > 0u &&
+            sizeof(struct omni_connection_manager_config) < 64u,
+        "manager config size bounded <64");
   /* capacity formula check */
   size_t cap = MGR_CAP;
   size_t total = sizeof(mgr) + cap * sizeof(struct omni_connection_manager_entry);
@@ -834,9 +1231,12 @@ int main(void) {
   test_descriptor_preservation();
   test_connection_ownership_preservation();
   test_repeated_cycles();
+  test_thousand_operation_stress();
   test_fd_census();
+  test_destroy_multiple_active();
   test_no_add_after_stopping();
   test_failed_add_unchanged();
+  test_failed_runtime_attach_rollback();
   test_memory_size();
   printf("---\n%d checks, %d failures\n", check_count, failure_count);
   return failure_count==0?0:1;

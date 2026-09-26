@@ -58,6 +58,12 @@
  *
  *     sizeof(struct omni_connection_manager)       — manager object
  *     sizeof(struct omni_connection_manager_entry) — one membership slot
+ *     sizeof(struct omni_connection_manager_config) — transient init view
+ *
+ *   Measured by the focused native test: manager 40 bytes, entry 24 bytes,
+ *   config 24 bytes. For capacity N, manager-owned logical storage is
+ *   40 + N * 24 bytes on this ABI; runtime/session and recv/send backing are
+ *   separate storage and are not part of the manager-only formula.
  *
  *   Capacity formula (caller reservation):
  *
@@ -231,21 +237,10 @@ enum omni_connection_manager_state omni_connection_manager_state(
     const struct omni_connection_manager *mgr);
 size_t omni_connection_manager_count(const struct omni_connection_manager *mgr);
 size_t omni_connection_manager_capacity(const struct omni_connection_manager *mgr);
-bool omni_connection_manager_is_initialized(const struct omni_connection_manager *mgr);
-bool omni_connection_manager_is_running(const struct omni_connection_manager *mgr);
 
 /* Find entry for a given connection, or NULL if not managed. */
-struct omni_connection_manager_entry *omni_connection_manager_find(
-    struct omni_connection_manager *mgr,
-    struct omni_connection *connection);
-
-/* Borrowed FD view for a managed connection, or FD_INVALID. */
-int omni_connection_manager_fd(struct omni_connection_manager *mgr,
-                               struct omni_connection *connection);
-
-/* Borrowed session view for a managed connection, or NULL. */
-struct omni_connection_session *omni_connection_manager_find_session(
-    struct omni_connection_manager *mgr,
+const struct omni_connection_manager_entry *omni_connection_manager_find(
+    const struct omni_connection_manager *mgr,
     struct omni_connection *connection);
 
 #endif /* OMNIROUTE_CONNECTION_MANAGER_H */

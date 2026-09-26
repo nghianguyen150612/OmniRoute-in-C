@@ -186,11 +186,11 @@ struct omni_connection_manager_result omni_connection_manager_add(
       attach_config->send_storage == NULL || attach_config->send_capacity == 0u) {
     return make_result(OMNI_CONNECTION_MANAGER_ERR_INVALID, EINVAL, 0u);
   }
-  if (mgr->count >= mgr->capacity) {
-    return make_result(OMNI_CONNECTION_MANAGER_ERR_FULL, ENOSPC, 0u);
-  }
   if (find_entry(mgr, attach_config->connection) != NULL) {
     return make_result(OMNI_CONNECTION_MANAGER_ERR_DUPLICATE, EEXIST, 0u);
+  }
+  if (mgr->count >= mgr->capacity) {
+    return make_result(OMNI_CONNECTION_MANAGER_ERR_FULL, ENOSPC, 0u);
   }
   slot = find_free(mgr);
   if (slot == NULL) {
@@ -347,37 +347,13 @@ size_t omni_connection_manager_capacity(const struct omni_connection_manager *mg
   return mgr->capacity;
 }
 
-bool omni_connection_manager_is_initialized(const struct omni_connection_manager *mgr) {
-  return mgr != NULL && mgr->live &&
-         (mgr->state == OMNI_CONNECTION_MANAGER_INITIALIZED ||
-          mgr->state == OMNI_CONNECTION_MANAGER_RUNNING ||
-          mgr->state == OMNI_CONNECTION_MANAGER_STOPPING);
-}
-
-bool omni_connection_manager_is_running(const struct omni_connection_manager *mgr) {
-  return mgr != NULL && mgr->live && mgr->state == OMNI_CONNECTION_MANAGER_RUNNING;
-}
-
-struct omni_connection_manager_entry *omni_connection_manager_find(
-    struct omni_connection_manager *mgr,
+const struct omni_connection_manager_entry *omni_connection_manager_find(
+    const struct omni_connection_manager *mgr,
     struct omni_connection *connection) {
-  if (mgr == NULL || connection == NULL || !mgr->live) return NULL;
-  return find_entry(mgr, connection);
-}
-
-int omni_connection_manager_fd(struct omni_connection_manager *mgr,
-                               struct omni_connection *connection) {
-  struct omni_connection_manager_entry *e = NULL;
-  e = omni_connection_manager_find(mgr, connection);
-  if (e == NULL) return OMNI_ACCEPTED_FD_INVALID;
-  /* Delegate to runtime for FD accuracy; runtime's session holds the FD. */
-  return omni_connection_runtime_fd(mgr->runtime, connection);
-}
-
-struct omni_connection_session *omni_connection_manager_find_session(
-    struct omni_connection_manager *mgr,
-    struct omni_connection *connection) {
-  if (mgr == NULL || connection == NULL || !mgr->live) return NULL;
-  if (find_entry(mgr, connection) == NULL) return NULL;
-  return omni_connection_runtime_find_session(mgr->runtime, connection);
+  if (mgr == NULL || connection == NULL || !mgr->live || mgr->entries == NULL) return NULL;
+  for (size_t i = 0u; i < mgr->capacity; ++i) {
+    const struct omni_connection_manager_entry *entry = &mgr->entries[i];
+    if (entry->occupied && entry->connection == connection) return entry;
+  }
+  return NULL;
 }
