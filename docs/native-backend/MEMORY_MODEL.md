@@ -593,6 +593,32 @@ CLOSING` and is idempotent from `CLOSING`/`CLOSED`; destroy releases both
     connection, and performs 1,000 bounded admit/release cycles with a stable
     FD census. The bridge stays test-only; production startup and protocol
     behavior remain deferred.
+  - Bounded managed connection readiness dispatch implemented (Task 031,
+    `native/src/connection_dispatch.c`,
+    `omni_connection_dispatch_*`): the callback borrows the existing manager,
+    checks that the connection pointer and generation token still match live
+    manager membership, and resolves the OPEN session through the manager's
+    existing runtime entry. It does not maintain a duplicate connection map.
+    ERROR/HANGUP/INVALID are recorded first; INVALID suppresses I/O. For a
+    valid combined READ|WRITE event, the bridge delegates exactly one
+    `connection_session_readable()` before at most one
+    `connection_session_writable()`. Lower-layer byte counts and errno
+    results are retained; EOF and fatal I/O are marked close-worthy without
+    automatic detach, destruction, or close. The bridge borrows the manager
+    and callback-context lifetime, owns only fixed local counters/result
+    state, never changes reactor interest, and makes no heap or direct
+    low-level calls. Cumulative counters saturate at the maximum
+    representable unsigned 64-bit value.
+    Permanently enabled WRITE interest can produce continuous readiness on
+    common TCP sockets; tests configure it explicitly, and dynamic interest
+    synchronization is deferred to Task 032. The current 64-bit Linux ABI
+    measures the bridge, config, and result as 152, 8, and 72 bytes. Its
+    focused loopback test proves listener-admission through the existing
+    connection reactor into the exact raw session receive buffer, a separate
+    buffered session WRITE to the peer, invalid/stale event handling,
+    ownership, and 1,000 admit/read/release cycles with bounded manager and
+    admission counts and a baseline FD census. It remains test-only; no HTTP,
+    protocol, or production-startup behavior is introduced.
 - Caches: global byte budget (e.g. single-digit MiB default on iOS, higher
   on Linux via config), per-cache caps, idle eviction; heavy caches
   (catalog, embeddings) releasable.

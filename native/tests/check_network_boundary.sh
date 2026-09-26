@@ -1,5 +1,5 @@
 #!/bin/sh
-# Task 030 network source-boundary gate: native networking exists, but ONLY
+# Task 031 network source-boundary gate: native networking exists, but ONLY
 # in the deliberate networking layer (src/listener.c owns socket lifecycle,
 # src/poller.c owns the readiness wait, src/accepted.c owns the accept4
 # drain plus accepted-descriptor lifecycle, src/recv.c owns nonblocking
@@ -31,6 +31,9 @@
 # The listener-admission bridge in src/listener_admission.c only registers the
 # borrowed listener with the existing reactor and invokes the bounded Task 029
 # drain from its callback; it performs no direct socket or heap call.
+# The connection-dispatch bridge in src/connection_dispatch.c only validates
+# manager membership/token state and delegates through the existing runtime,
+# session, and I/O APIs; it performs no direct socket, reactor, or heap call.
 # Every other production module (arena, bytebuf, meminfo, main, all other
 # headers and sources) must stay socket-free, and the deferred layers — output
 # queues, generic payload read/write, DNS/client, threads, TLS, and protocols —
@@ -40,8 +43,10 @@
 # send path to src/send.c, connection composition to src/connection.c, and
 # membership bookkeeping to src/registry.c, connection/reactor binding to
 # src/connection_reactor.c, and loop orchestration to src/event_loop.c,
-# exactly as the readiness wait is confined to src/poller.c. Later tasks extend
-# this gate explicitly; they never loosen it silently.
+# exactly as the readiness wait is confined to src/poller.c. Readiness
+# dispatch remains separate from listener admission and does not mutate
+# connection reactor interests. Later tasks extend this gate explicitly; they
+# never loosen it silently.
 #
 # Tests under tests/ are intentionally NOT scanned: the loopback tests
 # legitimately use client-side sockets and controlled test-client sends.
@@ -193,14 +198,14 @@ fi
 # 10. Zero-heap rule for the accept, receive, send, connection, registry,
 # connection/reactor adapter, runtime, event-loop, connection I/O,
 # connection/session, connection runtime binding, connection manager, and
-# connection admission, and listener-admission bridge
+# connection admission, listener-admission bridge, and connection-dispatch bridge
 # layers: bounded acceptance, bounded drain, single receive, single send,
 # both bounded drains, lifecycle composition, membership bookkeeping,
 # adapter binding, runtime coordination, loop execution, bounded I/O buffer
 # interaction, session coordination, runtime binding, and bounded manager
 # membership/admission coordination perform no heap allocation. Allocator tokens are banned
 # outright (negative control for the
-# Task 016/017/018/019/020/022/025/026/027/028/029/030 contracts).
+# Task 016/017/018/019/020/022/025/026/027/028/029/030/031 contracts).
 NOHEAP_IN_ACCEPT='\<(malloc|calloc|realloc|free|mmap)\s*\('
 
 HEAP_HITS=$(grep -nE "$NOHEAP_IN_ACCEPT" "$NATIVE_DIR/src/accepted.c" \
@@ -210,9 +215,10 @@ HEAP_HITS=$(grep -nE "$NOHEAP_IN_ACCEPT" "$NATIVE_DIR/src/accepted.c" \
   "$NATIVE_DIR/src/connection_io.c" "$NATIVE_DIR/src/connection_session.c" \
   "$NATIVE_DIR/src/connection_runtime.c" "$NATIVE_DIR/src/connection_manager.c" \
   "$NATIVE_DIR/src/connection_admission.c" \
-  "$NATIVE_DIR/src/listener_admission.c") || true
+  "$NATIVE_DIR/src/listener_admission.c" \
+  "$NATIVE_DIR/src/connection_dispatch.c") || true
 if [ -n "$HEAP_HITS" ]; then
-  echo "FAIL: heap-allocation call in accepted/recv/send/connection/registry/connection_reactor/runtime/event_loop/connection_io/connection_session/connection_runtime/connection_manager/connection_admission/listener_admission production layer (see match above)" >&2
+  echo "FAIL: heap-allocation call in accepted/recv/send/connection/registry/connection_reactor/runtime/event_loop/connection_io/connection_session/connection_runtime/connection_manager/connection_admission/listener_admission/connection_dispatch production layer (see match above)" >&2
   echo "$HEAP_HITS" >&2
   FAIL=1
 fi
@@ -221,4 +227,4 @@ if [ "$FAIL" -ne 0 ]; then
   exit 1
 fi
 
-echo "OK: networking confined to listener/poller/accepted/recv/send/connection/registry/connection_reactor/connection_io/connection_session/connection_runtime/connection_manager/connection_admission production modules; runtime coordinates lifecycle; event_loop coordinates reactor execution; connection_io owns bounded buffer I/O through recv/send; connection_session coordinates connection+io lifecycle; connection_runtime coordinates event_loop+reactor+session; connection_manager manages bounded runtime membership; connection_admission coordinates bounded accept and attach; listener_admission registers listener READ readiness and invokes the bounded admission drain; send uses MSG_NOSIGNAL; no alternate-loop/scatter/generic-IO/thread/TLS calls; no heap calls in accepted.c, recv.c, send.c, connection.c, registry.c, connection_reactor.c, runtime.c, event_loop.c, connection_io.c, connection_session.c, connection_runtime.c, connection_manager.c, connection_admission.c, or listener_admission.c"
+echo "OK: networking confined to listener/poller/accepted/recv/send/connection/registry/connection_reactor/connection_io/connection_session/connection_runtime/connection_manager/connection_admission/listener_admission/connection_dispatch production modules; runtime coordinates lifecycle; event_loop coordinates reactor execution; connection_io owns bounded buffer I/O through recv/send; connection_session coordinates connection+io lifecycle; connection_runtime coordinates event_loop+reactor+session; connection_manager manages bounded runtime membership; connection_admission coordinates bounded accept and attach; listener_admission registers listener READ readiness and invokes the bounded admission drain; connection_dispatch resolves manager tokens and delegates one bounded session read then write without reactor mutation; send uses MSG_NOSIGNAL; no alternate-loop/scatter/generic-IO/thread/TLS calls; no heap calls in accepted.c, recv.c, send.c, connection.c, registry.c, connection_reactor.c, runtime.c, event_loop.c, connection_io.c, connection_session.c, connection_runtime.c, connection_manager.c, connection_admission.c, listener_admission.c, or connection_dispatch.c"

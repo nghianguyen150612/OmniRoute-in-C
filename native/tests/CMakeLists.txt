@@ -274,3 +274,16 @@ target_link_libraries(test_listener_admission PRIVATE
 omni_apply_native_flags(test_listener_admission)
 add_test(NAME listener-admission-unit COMMAND test_listener_admission)
 set_tests_properties(listener-admission-unit PROPERTIES TIMEOUT 300)
+
+# Bounded managed connection readiness dispatch (Task 031). The bridge
+# remains test-only and is not linked into omniroute-native.
+add_executable(test_connection_dispatch test_connection_dispatch.c)
+target_link_libraries(test_connection_dispatch PRIVATE
+  omni_connection_dispatch omni_connection_admission omni_listener_admission
+  omni_connection_manager omni_connection_runtime omni_connection_session
+  omni_connection_io omni_connection omni_connection_reactor omni_reactor
+  omni_registry omni_poller omni_event_loop omni_runtime omni_listener omni_recv
+  omni_send omni_accepted omni_bytebuf)
+omni_apply_native_flags(test_connection_dispatch)
+add_test(NAME connection-dispatch-unit COMMAND test_connection_dispatch)
+set_tests_properties(connection-dispatch-unit PROPERTIES TIMEOUT 300)

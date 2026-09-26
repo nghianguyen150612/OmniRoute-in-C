@@ -45,7 +45,7 @@ no `-march=native`, no LTO.
 native/
   README.md                  # this file (build matrix, behavior, baseline)
   CMakeLists.txt             # Linux-first build described above
-  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h, reactor.h, connection_reactor.h, runtime.h, event_loop.h, connection_io.h, connection_session.h, connection_runtime.h, connection_manager.h, connection_admission.h
+  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h, reactor.h, connection_reactor.h, runtime.h, event_loop.h, connection_io.h, connection_session.h, connection_runtime.h, connection_manager.h, connection_admission.h, listener_admission.h, connection_dispatch.h
   src/
     main.c                   # entry point, tiny CLI, lifecycle
     meminfo.c                # Linux /proc/self/status RSS hook (+ stub elsewhere)
@@ -68,11 +68,13 @@ native/
     connection_manager.c     # bounded runtime membership (Task 028)
     connection_admission.c   # bounded accept-to-manager admission (Task 029)
     listener_admission.c     # bounded listener-readiness admission bridge (Task 030)
+    connection_dispatch.c    # bounded manager/session readiness dispatch (Task 031)
   tests/
     CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
     test_connection_manager.c # bounded manager unit, rollback, ownership, and stress checks
     test_connection_admission.c # bounded admission, rollback, ownership, and stress checks
     test_listener_admission.c # bounded reactor bridge and event-loop integration checks
+    test_connection_dispatch.c # managed READ/WRITE dispatch and admission integration checks
     check_network_boundary.sh  # review gate: socket setup confined to src/listener.c,
                               # readiness wait to src/poller.c, accept path plus
                               # accepted-FD lifecycle to src/accepted.c, receive
@@ -84,7 +86,8 @@ native/
                               # src/connection_session.c, runtime binding to
                               # src/connection_runtime.c, membership to
                               # src/connection_manager.c, and admission to
-                              # src/connection_admission.c; alternate
+                              # src/connection_admission.c and
+                              # src/connection_dispatch.c; alternate
                               # loop backends, queues, IO/scatter/TLS are
                               # banned everywhere in production sources, with
                               # heap allocation banned in the bounded native
@@ -1547,7 +1550,101 @@ admission, manager, runtime, and event-loop storage are separate.
 `omni_listener_admission` is linked only into `test_listener_admission`.
 `omniroute-native` startup remains unchanged: it starts no listener or
 production event loop. HTTP, protocol state, production daemon startup, and
-Task 031 remain deferred.
+Task 032 remain deferred.
+
+## Bounded managed connection readiness dispatch (Task 031)
+
+Task 031 connects the existing connection-reactor callback to the session and
+I/O layer through a test-only bridge
+(`include/omniroute/connection_dispatch.h`, `src/connection_dispatch.c`, and
+`tests/test_connection_dispatch.c`):
+
+```text
+event_loop / reactor_step
+    -> connection_reactor generation-token validation
+    -> connection_dispatch manager membership + token validation
+    -> connection_runtime_find_session()
+    -> connection_session_readable() / connection_session_writable()
+    -> existing bounded receive/send operations
+```
+
+The callback is passed directly to `omni_connection_reactor_init()`. Init
+borrows a live manager and runtime; it does not register or remove reactor
+entries. A callback must match the current manager entry's connection pointer
+and generation token, then resolve an OPEN session through the manager's
+existing runtime. Missing membership, a retired or mismatched token, a
+closing connection, or a non-OPEN session produces an explicit ignored/stale
+result and performs no I/O. The bridge keeps no second connection/session map.
+
+The fixed result records the original event mask and token, per-direction
+session I/O results (including their errno), bytes moved, attempted flags,
+stale/ignored flags, and close-worthy observations. Dispatch counters,
+ignored/stale counts, read/write counts, error-event observations, and byte
+totals saturate at `UINT64_MAX`. The bridge lifecycle is
+`INERT -> ACTIVE -> CLOSED`; duplicate init is rejected, and destroy only
+clears borrowed references and local lifecycle state.
+
+For combined readiness, ERROR/HANGUP/INVALID are recorded first. INVALID
+suppresses ordinary I/O because the descriptor cannot be used safely. If
+READ and WRITE are also present on a valid descriptor, one READ runs before
+one WRITE. Each delegates once through the session. Bytes remain in the
+existing bounded byte buffers; this layer does not parse, compact, queue,
+retry, or loop. EOF, fatal receive/send errors, and peer-closed writes are
+reported through the embedded I/O results and `close_worthy`; manager
+membership, connection/session lifecycle, reactor registrations, and the FD
+remain with their existing owners.
+
+The bridge borrows the manager and uses manager membership/token lookup,
+then `connection_runtime_find_session()`. It owns only local accounting and
+the last fixed-size result. It never owns or closes an FD, destroys a
+connection/session, removes membership, changes registration interests, or
+allocates. Its callback context must stay alive until connection-reactor
+registrations that can call it have been detached, even if the bridge was
+destroyed earlier.
+
+The bridge preserves the connection's configured interest mask. A socket is
+often writable continuously, so permanent WRITE interest on connections with
+no queued data can keep a readiness loop busy. Tests that need WRITE readiness
+configure their connection explicitly with WRITE interest. Dynamic
+READ/WRITE interest synchronization and backpressure policy are deferred to
+Task 032.
+
+The focused loopback suite proves the full listener-readiness admission path
+followed by connection READ readiness into the exact session receive buffer,
+including NUL and high-byte values. A separate WRITE-readiness proof appends
+binary data to an already-managed session buffer and verifies exact peer
+bytes. The suite also covers would-block, buffer-full/no-compaction, EOF,
+fatal read/write, ERROR/HANGUP/real INVALID, combined events, manager removal,
+session/connection closure, generation reuse, ownership preservation,
+saturating counters, and 1,000 real admit/read/release cycles with manager and
+admission capacity bounds plus an FD census.
+
+On the current 64-bit Linux ABI, the focused test measures
+`sizeof(struct omni_connection_dispatch)` as 152 bytes,
+`sizeof(struct omni_connection_dispatch_config)` as 8 bytes, and
+`sizeof(struct omni_connection_dispatch_result)` as 72 bytes. No per-
+connection dispatch table or heap-backed callback state is retained. The
+bridge is linked only into `test_connection_dispatch`; production startup,
+version output, and the native executable remain unchanged. HTTP, API parity,
+protocol framing, and production server startup remain out of scope.
+
+## Task 031 validation record
+
+`connection-dispatch-unit` passes 90 checks with zero failures, including
+listener-to-session READ integration, managed WRITE integration, and the
+1,000-cycle admit/read/release stress with a stable FD census. The source
+boundary gate passes with no direct network, readiness, descriptor-lifecycle,
+heap, thread, TLS, or alternate-loop calls in `connection_dispatch.c`.
+Full native CTest passes 29/29 in every matrix leg: GCC Debug, GCC Release,
+GCC Debug ASan+UBSan, Clang Debug, Clang Release, and Clang Debug ASan+UBSan.
+`npm run check:docs-all` passes; its reports include the repository's 91
+version-drift warnings and two soft documentation-count warnings. The
+production executable target builds, `--version` still prints
+`omniroute-native 0.1.0`, and ordinary startup still prints the existing
+`ready (debug, c11)` line before exiting. `nm -g` shows only `main`,
+`omni_meminfo_read`, and runtime support symbols; no listener, reactor,
+manager, admission, session, or dispatch symbols are linked into the
+executable, and startup opens no listener.
 
 ## Initial baseline (Task 011, measured 2026-09-19)
 

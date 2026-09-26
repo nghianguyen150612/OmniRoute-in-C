@@ -164,6 +164,12 @@ add_library(omni_connection_admission STATIC
 add_library(omni_listener_admission STATIC
   src/listener_admission.c)
 
+# The Task 031 connection-readiness bridge resolves live managed sessions and
+# delegates bounded read/write readiness. It remains test-only; production
+# startup does not register a connection dispatcher.
+add_library(omni_connection_dispatch STATIC
+  src/connection_dispatch.c)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
@@ -187,6 +193,7 @@ target_include_directories(omni_connection_runtime PUBLIC include)
 target_include_directories(omni_connection_manager PUBLIC include)
 target_include_directories(omni_connection_admission PUBLIC include)
 target_include_directories(omni_listener_admission PUBLIC include)
+target_include_directories(omni_connection_dispatch PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 target_link_libraries(omni_event_loop PUBLIC omni_runtime omni_reactor omni_registry omni_poller
@@ -233,6 +240,7 @@ omni_apply_native_flags(omni_connection_runtime)
 omni_apply_native_flags(omni_connection_manager)
 omni_apply_native_flags(omni_connection_admission)
 omni_apply_native_flags(omni_listener_admission)
+omni_apply_native_flags(omni_connection_dispatch)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)
