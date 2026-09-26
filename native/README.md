@@ -3,8 +3,9 @@
 > Task 011 foundation. This directory holds the first production C for
 > OmniRoute-in-C: a minimal executable skeleton with deterministic
 > startup/shutdown and basic memory instrumentation. It is **not** an HTTP
-> server yet — no port is bound, no network is contacted, no database is
-> opened. User-facing backend functionality is NOT STARTED (`FEATURE_PARITY.md`
+> server yet — Task 033 adds only a standalone request-line parser, which is
+> not wired into startup; no port is bound, no network is contacted, and no
+> database is opened. User-facing backend functionality is NOT STARTED (`FEATURE_PARITY.md`
 > stays uniformly `NOT STARTED` until vertical slices land with harness proof).
 
 Design sources: `docs/native-backend/MIGRATION_PLAN.md` §1 (this layout),
@@ -45,7 +46,7 @@ no `-march=native`, no LTO.
 native/
   README.md                  # this file (build matrix, behavior, baseline)
   CMakeLists.txt             # Linux-first build described above
-  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h, reactor.h, connection_reactor.h, runtime.h, event_loop.h, connection_io.h, connection_session.h, connection_runtime.h, connection_manager.h, connection_admission.h, listener_admission.h, connection_dispatch.h
+  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h, reactor.h, connection_reactor.h, runtime.h, event_loop.h, connection_io.h, connection_session.h, connection_runtime.h, connection_manager.h, connection_admission.h, listener_admission.h, connection_dispatch.h, connection_policy.h, http_request_line.h
   src/
     main.c                   # entry point, tiny CLI, lifecycle
     meminfo.c                # Linux /proc/self/status RSS hook (+ stub elsewhere)
@@ -69,12 +70,15 @@ native/
     connection_admission.c   # bounded accept-to-manager admission (Task 029)
     listener_admission.c     # bounded listener-readiness admission bridge (Task 030)
     connection_dispatch.c    # bounded manager/session readiness dispatch (Task 031)
+    connection_policy.c      # bounded lifecycle and reactor-interest policy (Task 032)
+    http_request_line.c      # bounded zero-copy HTTP request-line parser (Task 033)
   tests/
     CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
     test_connection_manager.c # bounded manager unit, rollback, ownership, and stress checks
     test_connection_admission.c # bounded admission, rollback, ownership, and stress checks
     test_listener_admission.c # bounded reactor bridge and event-loop integration checks
     test_connection_dispatch.c # managed READ/WRITE dispatch and admission integration checks
+    test_http_request_line.c   # bounded parser grammar, limits, and truncation checks
     check_network_boundary.sh  # review gate: socket setup confined to src/listener.c,
                               # readiness wait to src/poller.c, accept path plus
                               # accepted-FD lifecycle to src/accepted.c, receive
@@ -1731,6 +1735,61 @@ no Task 031/032 or networking symbols. `npm run check:docs-all` passes after
 this validation record was added; only the repository's pre-existing soft
 documentation drift/count warnings are reported.
 
+## Bounded HTTP request-line parser (Task 033)
+
+Task 033 adds `include/omniroute/http_request_line.h` and
+`src/http_request_line.c`, a standalone parser for exactly
+`METHOD SP REQUEST-TARGET SP HTTP-VERSION CRLF`. It is built as the separate
+`omni_http_request_line` static library and linked only into
+`http-request-line-unit`; it is not connected to `main.c`, the event loop,
+connection dispatch, or production startup. This is the first HTTP protocol
+primitive in the native backend.
+
+`omni_http_request_line_parse(data, length)` is stateless and single-pass. It
+accepts a nonempty HTTP token method, a nonempty visible-ASCII target byte
+sequence (`0x21` through `0x7e`), and the exact version shape `HTTP/d.d`.
+Only `HTTP/1.0` and `HTTP/1.1` are supported; other digit-shaped versions
+return `UNSUPPORTED_VERSION`. It requires CRLF. Bare LF is invalid, and a
+prefix ending after CR remains incomplete until LF arrives.
+
+The public limits are 32 method bytes, 4,060 target bytes, and 4,096 total
+request-line bytes including CRLF. `COMPLETE` exposes borrowed method and
+target spans, the version enum, and the exact consumed byte count. Spans point
+into caller storage and remain valid only while that storage stays alive and
+unchanged; they are not NUL-terminated. `INCOMPLETE` exposes no partial
+spans and consumes zero bytes. `INVALID`, `TOO_LARGE`,
+`UNSUPPORTED_VERSION`, and `ERR_INVALID_ARGUMENT` are explicit results with
+deterministic offsets. Bytes after the first CRLF are ignored by this parser.
+
+The parser uses no heap, I/O, syscalls, locale-sensitive classification, or
+retained state. Its work is O(min(input prefix, 4,096 bytes)); additional
+memory and persistent parser state are both zero bytes. On the tested 64-bit
+Linux ABI, `sizeof(struct omni_http_byte_span)` is 16 bytes and
+`sizeof(struct omni_http_request_line_result)` is 64 bytes. This primitive
+does not parse headers or bodies, serialize responses, route, or implement an
+HTTP server.
+
+## Task 033 validation record
+
+`http-request-line-unit` reports 3,043 checks and zero failures. It covers
+valid borrowed spans, bytes after CRLF, every prefix of three valid request
+lines, strict spacing and endings, field and total limits, null arguments,
+stable error offsets, and all 256 byte values at every method, target, and
+version-token position. Prefix tests use exact-size input allocations so the
+sanitizer legs can detect a read beyond the supplied length. Input snapshots
+remain unchanged, and the test measures the 16-byte span and 64-byte result.
+
+Full native CTest passes 31/31 in GCC Debug, GCC Release, GCC Debug
+ASan+UBSan, Clang Debug, Clang Release, and Clang Debug ASan+UBSan. Both
+sanitizer configurations use
+`ASAN_OPTIONS=detect_leaks=1:halt_on_error=1` and
+`UBSAN_OPTIONS=halt_on_error=1`. The direct network/heap boundary gate passes
+with `http_request_line.c` included. The GCC Release production executable
+builds; its `--version` and normal startup output match the pre-change
+Task 032 baseline byte-for-byte, and `nm` shows no request-line parser symbol
+linked into it. `npm run check:docs-all` passes; it reports 91 repository-wide
+potential stale-date/version drifts. `git diff --check` passes.
+
 ## Initial baseline (Task 011, measured 2026-09-19)
 
 Environment: Linux 7.2.4-zen2 x86_64, 8 CPUs, 16 GiB RAM; GCC 16.2.1,
@@ -1821,7 +1880,8 @@ from the migration design happens when iOS work starts.
 ## Intentionally deferred
 
 Alternate event-loop backends (epoll/io_uring), production connection dispatcher,
-HTTP, `/health`, `/v1/models`, TLS, SQLite, crypto,
+HTTP headers/bodies, response serialization, full HTTP serving, `/health`,
+`/v1/models`, TLS, SQLite, crypto,
 auth, providers, routing, streaming, compression, MCP, A2A,
 Objective-C/Swift/assembly.
 (Arenas, byte buffers, listener lifecycle, readiness observation,
@@ -1831,7 +1891,8 @@ the protocol-agnostic connection owner, the bounded connection registry, the
 connection/reactor lifecycle adapter, the runtime coordinator, the bounded
 synchronous event loop, the bounded connection I/O state machine, the
 bounded connection/session integration, and the
-bounded connection runtime binding are
+bounded connection runtime binding, the Task 032 connection lifecycle policy,
+and the Task 033 standalone request-line parser are
 landed primitives now — see above.) Each
 remaining item gets its own reviewable task.
 // linguist refresh

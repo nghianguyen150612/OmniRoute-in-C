@@ -649,6 +649,23 @@ CLOSING` and is idempotent from `CLOSING`/`CLOSED`; destroy releases both
     executable builds and retains its version/startup output, with no Task
     031/032 or networking symbols linked. `npm run check:docs-all` passes after
     this documentation update, with only existing soft drift/count warnings.
+  - The first HTTP protocol primitive in the native C layer is its bounded
+    request-line parser (Task 033,
+    `native/src/http_request_line.c`, `omni_http_request_line_parse()`). It
+    inspects one `(pointer, length)` input span and returns borrowed method
+    and target spans only after a complete `METHOD SP TARGET SP HTTP/d.d CRLF`
+    line. It accepts HTTP/1.0 and HTTP/1.1, requires strict CRLF, reports
+    incomplete viable prefixes without partial spans, and ignores bytes after
+    the first line ending. Method, target, and total-line caps are 32, 4,060,
+    and 4,096 bytes. The parser performs no I/O, heap allocation, or retained
+    state; its per-call additional memory and persistent state are zero bytes.
+    On the measured 64-bit Linux ABI the span and result are 16 and 64 bytes.
+    It remains standalone and test-only: headers, bodies, response
+    serialization, routing, and production HTTP wiring remain deferred. Its
+    focused suite reports 3,043 checks with zero failures; full native CTest
+    passes 31/31 in GCC and Clang Debug, Release, and Debug ASan+UBSan builds.
+    The network/heap boundary gate passes, and the GCC Release executable
+    retains its baseline version/startup output with no parser symbol linked.
 - Caches: global byte budget (e.g. single-digit MiB default on iOS, higher
   on Linux via config), per-cache caps, idle eviction; heavy caches
   (catalog, embeddings) releasable.

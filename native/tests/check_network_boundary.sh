@@ -1,5 +1,5 @@
 #!/bin/sh
-# Task 032 network source-boundary gate: native networking exists, but ONLY
+# Task 033 network source-boundary gate: native networking exists, but ONLY
 # in the deliberate networking layer (src/listener.c owns socket lifecycle,
 # src/poller.c owns the readiness wait, src/accepted.c owns the accept4
 # drain plus accepted-descriptor lifecycle, src/recv.c owns nonblocking
@@ -39,11 +39,15 @@
 # existing owners, and performs no direct socket, readiness, descriptor, or
 # heap operation. Interest updates flow through the connection-reactor and
 # reactor APIs so poller, reactor, and connection metadata remain ordered.
+# The standalone parser in src/http_request_line.c validates one bounded
+# request line with no I/O, allocation, or retained state; headers, bodies,
+# routing, and production startup remain outside its scope.
 # Every other production module (arena, bytebuf, meminfo, main, all other
-# headers and sources) must stay socket-free, and the deferred layers — output
-# queues, generic payload read/write, DNS/client, threads, TLS, and protocols —
-# stay banned from ALL production sources, including the networking layer
-# itself except for the one authorized send call in src/send.c. The accept
+# headers and sources) must stay socket-free. The deferred layers — output
+# queues, generic payload read/write, DNS/client, threads, TLS, HTTP headers
+# and bodies, and application behavior — stay banned from ALL production
+# sources, including the networking layer itself except for the one authorized
+# send call in src/send.c. The accept
 # path is confined to src/accepted.c, the receive path to src/recv.c, the
 # send path to src/send.c, connection composition to src/connection.c, and
 # membership bookkeeping to src/registry.c, connection/reactor binding to
@@ -204,14 +208,14 @@ fi
 # connection/reactor adapter, runtime, event-loop, connection I/O,
 # connection/session, connection runtime binding, connection manager, and
 # connection admission, listener-admission bridge, connection-dispatch bridge,
-# and connection-policy layer
+# connection-policy layer, and standalone bounded request-line parser
 # layers: bounded acceptance, bounded drain, single receive, single send,
 # both bounded drains, lifecycle composition, membership bookkeeping,
 # adapter binding, runtime coordination, loop execution, bounded I/O buffer
 # interaction, session coordination, runtime binding, and bounded manager
 # membership/admission coordination perform no heap allocation. Allocator tokens are banned
 # outright (negative control for the
-# Task 016/017/018/019/020/022/025/026/027/028/029/030/031/032 contracts).
+# Task 016/017/018/019/020/022/025/026/027/028/029/030/031/032/033 contracts).
 NOHEAP_IN_ACCEPT='\<(malloc|calloc|realloc|free|mmap)\s*\('
 
 HEAP_HITS=$(grep -nE "$NOHEAP_IN_ACCEPT" "$NATIVE_DIR/src/accepted.c" \
@@ -223,9 +227,10 @@ HEAP_HITS=$(grep -nE "$NOHEAP_IN_ACCEPT" "$NATIVE_DIR/src/accepted.c" \
   "$NATIVE_DIR/src/connection_admission.c" \
   "$NATIVE_DIR/src/listener_admission.c" \
   "$NATIVE_DIR/src/connection_dispatch.c" \
-  "$NATIVE_DIR/src/connection_policy.c") || true
+  "$NATIVE_DIR/src/connection_policy.c" \
+  "$NATIVE_DIR/src/http_request_line.c") || true
 if [ -n "$HEAP_HITS" ]; then
-  echo "FAIL: heap-allocation call in accepted/recv/send/connection/registry/connection_reactor/runtime/event_loop/connection_io/connection_session/connection_runtime/connection_manager/connection_admission/listener_admission/connection_dispatch/connection_policy production layer (see match above)" >&2
+  echo "FAIL: heap-allocation call in accepted/recv/send/connection/registry/connection_reactor/runtime/event_loop/connection_io/connection_session/connection_runtime/connection_manager/connection_admission/listener_admission/connection_dispatch/connection_policy/http_request_line production layer (see match above)" >&2
   echo "$HEAP_HITS" >&2
   FAIL=1
 fi
@@ -234,4 +239,4 @@ if [ "$FAIL" -ne 0 ]; then
   exit 1
 fi
 
-echo "OK: networking confined to listener/poller/accepted/recv/send/connection/registry/connection_reactor/connection_io/connection_session/connection_runtime/connection_manager/connection_admission/listener_admission/connection_dispatch/connection_policy production modules; runtime coordinates lifecycle; event_loop coordinates reactor execution; connection_io owns bounded buffer I/O through recv/send; connection_session coordinates connection+io lifecycle; connection_runtime coordinates event_loop+reactor+session; connection_manager manages bounded runtime membership; connection_admission coordinates bounded accept and attach; listener_admission registers listener READ readiness and invokes the bounded admission drain; connection_dispatch resolves manager tokens and delegates one bounded session read then write without reactor mutation; connection_policy synchronizes READ/WRITE interests and releases through admission; send uses MSG_NOSIGNAL; no alternate-loop/scatter/generic-IO/thread/TLS calls; no heap calls in accepted.c, recv.c, send.c, connection.c, registry.c, connection_reactor.c, runtime.c, event_loop.c, connection_io.c, connection_session.c, connection_runtime.c, connection_manager.c, connection_admission.c, listener_admission.c, connection_dispatch.c, or connection_policy.c"
+echo "OK: networking confined to listener/poller/accepted/recv/send/connection/registry/connection_reactor/connection_io/connection_session/connection_runtime/connection_manager/connection_admission/listener_admission/connection_dispatch/connection_policy production modules; runtime coordinates lifecycle; event_loop coordinates reactor execution; connection_io owns bounded buffer I/O through recv/send; connection_session coordinates connection+io lifecycle; connection_runtime coordinates event_loop+reactor+session; connection_manager manages bounded runtime membership; connection_admission coordinates bounded accept and attach; listener_admission registers listener READ readiness and invokes the bounded admission drain; connection_dispatch resolves manager tokens and delegates one bounded session read then write without reactor mutation; connection_policy synchronizes READ/WRITE interests and releases through admission; http_request_line parses one bounded request line without I/O or heap allocation; send uses MSG_NOSIGNAL; no alternate-loop/scatter/generic-IO/thread/TLS calls; no heap calls in accepted.c, recv.c, send.c, connection.c, registry.c, connection_reactor.c, runtime.c, event_loop.c, connection_io.c, connection_session.c, connection_runtime.c, connection_manager.c, connection_admission.c, listener_admission.c, connection_dispatch.c, connection_policy.c, or http_request_line.c"

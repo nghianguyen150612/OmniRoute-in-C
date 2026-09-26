@@ -300,3 +300,11 @@ target_link_libraries(test_connection_policy PRIVATE
 omni_apply_native_flags(test_connection_policy)
 add_test(NAME connection-policy-unit COMMAND test_connection_policy)
 set_tests_properties(connection-policy-unit PROPERTIES TIMEOUT 300)
+
+# Bounded HTTP request-line parser (Task 033). Standalone and test-only; it
+# does not introduce production startup, headers, bodies, or routing.
+add_executable(test_http_request_line test_http_request_line.c)
+target_link_libraries(test_http_request_line PRIVATE omni_http_request_line)
+omni_apply_native_flags(test_http_request_line)
+add_test(NAME http-request-line-unit COMMAND test_http_request_line)
+set_tests_properties(http-request-line-unit PROPERTIES TIMEOUT 60)
