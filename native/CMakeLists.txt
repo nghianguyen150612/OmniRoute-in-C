@@ -158,6 +158,12 @@ add_library(omni_connection_manager STATIC
 add_library(omni_connection_admission STATIC
   src/connection_admission.c)
 
+# The Task 030 listener-readiness bridge composes the generic reactor with
+# Task 029's bounded admission drain. It remains linked only into native
+# tests; production startup still does not register or accept a listener.
+add_library(omni_listener_admission STATIC
+  src/listener_admission.c)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
@@ -180,6 +186,7 @@ target_include_directories(omni_connection_session PUBLIC include)
 target_include_directories(omni_connection_runtime PUBLIC include)
 target_include_directories(omni_connection_manager PUBLIC include)
 target_include_directories(omni_connection_admission PUBLIC include)
+target_include_directories(omni_listener_admission PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 target_link_libraries(omni_event_loop PUBLIC omni_runtime omni_reactor omni_registry omni_poller
@@ -225,6 +232,7 @@ omni_apply_native_flags(omni_connection_session)
 omni_apply_native_flags(omni_connection_runtime)
 omni_apply_native_flags(omni_connection_manager)
 omni_apply_native_flags(omni_connection_admission)
+omni_apply_native_flags(omni_listener_admission)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)

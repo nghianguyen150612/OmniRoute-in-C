@@ -566,6 +566,33 @@ CLOSING` and is idempotent from `CLOSING`/`CLOSED`; destroy releases both
     not retained by the admission object. The focused Linux test reports
     1,141 checks, zero failures, measured sizes,
     and 1,000 admit/release cycles with a stable FD census.
+  - Bounded listener-admission reactor bridge implemented (Task 030,
+    `native/src/listener_admission.c`, `omni_listener_admission_*`): the
+    bridge borrows the same live listener used by Task 029, a live generic
+    reactor, the initialized admission object, and a caller-owned identity
+    output array. Start registers only the listener FD for READ under one
+    fixed bridge token; stop removes that registration before destroy clears
+    the callback context. Each synchronous READ callback invokes one Task 029
+    drain with a caller-specified nonzero attempt budget and output storage
+    sized for that budget. ERROR/HANGUP/INVALID is surfaced without accepting;
+    WRITE-only readiness is ignored. Drained, budget reached, admission or
+    manager capacity full, interrupted, transient, stopped, and other failure
+    results preserve the underlying Task 029 result. Capacity stops return
+    without spinning or removing listener interest, so later readiness can
+    retry after release. The bridge owns no FD, listener, admission, manager,
+    runtime, reactor, event loop, or identity storage and has no heap or
+    callback allocation. Its dispatch and total-admitted counters saturate at
+    the maximum `uint64_t` value. On the current 64-bit Linux ABI, measured
+    sizes are 152 bytes for `struct omni_listener_admission`, 48 bytes for
+    `struct omni_listener_admission_config`, and 80 bytes for
+    `struct omni_listener_admission_result`. The caller additionally supplies
+    at least `B * sizeof(struct omni_connection_admission_identity)` bytes for
+    a per-dispatch budget `B` (16 bytes per identity on this ABI); that array
+    is not embedded in the bridge. The focused loopback suite proves
+    listener registration through `omni_event_loop_run()` to a live managed
+    connection, and performs 1,000 bounded admit/release cycles with a stable
+    FD census. The bridge stays test-only; production startup and protocol
+    behavior remain deferred.
 - Caches: global byte budget (e.g. single-digit MiB default on iOS, higher
   on Linux via config), per-cache caps, idle eviction; heavy caches
   (catalog, embeddings) releasable.

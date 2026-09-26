@@ -67,10 +67,12 @@ native/
     connection_runtime.c     # bounded connection runtime binding (Task 027)
     connection_manager.c     # bounded runtime membership (Task 028)
     connection_admission.c   # bounded accept-to-manager admission (Task 029)
+    listener_admission.c     # bounded listener-readiness admission bridge (Task 030)
   tests/
     CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
     test_connection_manager.c # bounded manager unit, rollback, ownership, and stress checks
     test_connection_admission.c # bounded admission, rollback, ownership, and stress checks
+    test_listener_admission.c # bounded reactor bridge and event-loop integration checks
     check_network_boundary.sh  # review gate: socket setup confined to src/listener.c,
                               # readiness wait to src/poller.c, accept path plus
                               # accepted-FD lifecycle to src/accepted.c, receive
@@ -1458,6 +1460,94 @@ passed with 91 existing soft documentation-drift warnings and no broken-link
 or fabricated-reference findings. The production CLI startup and version
 output remain unchanged, and `nm` found no admission/manager/runtime/network
 symbols in `omniroute-native`.
+
+## Bounded listener admission bridge (Task 030)
+
+Task 030 connects the existing listener, Task 021 reactor, Task 024 event
+loop, and Task 029 admission pipeline through a test-only bridge
+(`include/omniroute/listener_admission.h`, `src/listener_admission.c`, and
+`tests/test_listener_admission.c`):
+
+```text
+event_loop_run()
+    -> omni_reactor_step()
+    -> listener READ callback
+    -> omni_connection_admission_drain(finite budget, caller identities)
+    -> connection_manager
+    -> live managed connections
+```
+
+The public surface is `omni_listener_admission_make_inert`,
+`omni_listener_admission_init`, `omni_listener_admission_start`,
+`omni_listener_admission_stop`, `omni_listener_admission_destroy`, and the
+state, last-result, dispatch-count, and total-admitted queries. Initialization
+borrows one live listener, reactor, and Task 029 admission object, plus a
+caller-owned identity array. It rejects a zero budget, a mismatched listener,
+unavailable dependencies, or identity storage smaller than the configured
+`max_admissions_per_dispatch`.
+
+Start registers the borrowed listener FD with `OMNI_POLLER_INTEREST_READ` and
+the bridge callback under the reserved
+`OMNI_LISTENER_ADMISSION_REACTOR_TOKEN` (`UINT64_MAX`). That token must be
+available in the reactor; a token/descriptor/capacity conflict is returned as
+a reactor registration failure with the underlying reactor status preserved.
+The bridge does not build another poller or event loop. Its lifecycle is
+`INERT -> INITIALIZED -> ACTIVE -> STOPPED -> CLOSED`; a failed start remains
+`INITIALIZED` without a partial registration. Stop removes the token before
+the callback context may be destroyed. If removal fails, the bridge remains
+`ACTIVE` and retains its borrowed references so the caller can retry. Stop
+does not release any connection already admitted.
+
+The callback runs synchronously within one reactor dispatch. ERROR, HANGUP,
+or INVALID readiness is recorded without admission. WRITE-only readiness is
+recorded and ignored. READ readiness invokes exactly one Task 029 drain with
+the caller's finite attempt budget and identity storage. The bridge does not
+retry an interrupted or transient result and preserves the lower admission
+result in its last-result record. DRAINED, budget reached, capacity full,
+stopped admission, and other admission failures remain distinguishable. A
+full admission slot or manager returns from the callback without spinning or
+removing the listener registration; later readiness can retry after capacity
+is released.
+
+The bridge owns no listener, descriptor, accepted connection, manager,
+runtime, reactor, event loop, or result array. It makes no direct network or
+heap calls. Callback work is limited to the bounded admission drain and
+saturating local accounting; it does not nest a reactor step or event-loop
+run. `dispatches` counts bridge callbacks, and `total_admitted` accumulates
+successful lower-layer admissions; both saturate at the maximum `uint64_t`
+value.
+
+The focused test uses ephemeral loopback ports. Its event-loop proof queues a
+client before `omni_event_loop_run()`, observes the registered listener
+callback admit it through Task 029, and uses a separate test-only ready pipe
+callback to request loop stop after the manager count rises. It does not call
+the admission drain directly for that proof. The suite also covers readiness
+filtering, registration rollback, bounded batches, slot/manager backpressure,
+stop/destroy ownership, and 1,000 bounded admit/release cycles with an FD
+census. The focused suite reports 3,093 checks with zero failures.
+
+Final Task 030 validation: GCC and Clang Debug, Release, and Debug
+ASan+UBSan builds each pass the full native CTest suite (28/28). The
+network/heap boundary gate and `npm run check:docs-all` pass; the docs gate
+reports 91 existing soft drift warnings. The production executable builds,
+prints its existing version/startup output, and has no listener, reactor,
+event-loop, manager, admission, or socket symbols according to `nm`.
+
+**Measured bridge memory**: on the current 64-bit Linux ABI, the focused test
+measures `sizeof(struct omni_listener_admission)` as 152 bytes,
+`sizeof(struct omni_listener_admission_config)` as 48 bytes, and
+`sizeof(struct omni_listener_admission_result)` as 80 bytes. The bridge's
+fixed object contains its borrowed references, counters, and last result; it
+has no embedded identity array. For budget `B`, the separately caller-owned
+identity output requires at least `B * sizeof(struct
+omni_connection_admission_identity)` bytes (16 bytes per identity on this
+ABI). Config/result temporaries and all underlying listener, reactor,
+admission, manager, runtime, and event-loop storage are separate.
+
+`omni_listener_admission` is linked only into `test_listener_admission`.
+`omniroute-native` startup remains unchanged: it starts no listener or
+production event loop. HTTP, protocol state, production daemon startup, and
+Task 031 remain deferred.
 
 ## Initial baseline (Task 011, measured 2026-09-19)
 

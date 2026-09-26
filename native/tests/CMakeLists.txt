@@ -260,3 +260,17 @@ target_link_libraries(test_connection_admission PRIVATE omni_connection_admissio
 omni_apply_native_flags(test_connection_admission)
 add_test(NAME connection-admission-unit COMMAND test_connection_admission)
 set_tests_properties(connection-admission-unit PROPERTIES TIMEOUT 300)
+
+# Bounded listener-readiness admission bridge (Task 030): generic reactor
+# registration, finite Task 029 drains, lifecycle removal, and loopback
+# event-loop integration. Production startup stays unchanged.
+add_executable(test_listener_admission test_listener_admission.c)
+target_link_libraries(test_listener_admission PRIVATE
+  omni_listener_admission omni_connection_admission omni_connection_manager
+  omni_connection_runtime omni_connection_session omni_connection_io
+  omni_connection omni_connection_reactor omni_reactor omni_registry omni_poller
+  omni_event_loop omni_runtime omni_listener omni_recv omni_send omni_accepted
+  omni_bytebuf)
+omni_apply_native_flags(test_listener_admission)
+add_test(NAME listener-admission-unit COMMAND test_listener_admission)
+set_tests_properties(listener-admission-unit PROPERTIES TIMEOUT 300)
