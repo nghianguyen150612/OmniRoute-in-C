@@ -849,6 +849,27 @@ removed.
 
 ---
 
-_Next: MIGRATION_PLAN.md (incremental path + harness)._
+## 8. Native bounded HTTP header-line parser (Task 034)
 
-(End of file - total 501 lines)
+`native/src/http_header_line.c` parses one
+`field-name ":" OWS field-value OWS CRLF` line from a caller-owned byte span.
+The parser keeps no object or persistent state (0 bytes), allocates no heap
+memory, performs no I/O, and returns borrowed name/value spans. The spans are
+valid only while the input storage remains alive and unchanged; no NUL
+termination or copy is provided.
+
+The parser skips leading SP/HTAB after the colon and trims trailing SP/HTAB.
+Interior whitespace stays in the value. Empty values are valid. Name syntax
+uses explicit ASCII HTTP token classification with case preserved. Value
+syntax accepts HTAB, SP, and visible ASCII only; high bytes are rejected.
+CRLF is mandatory; a viable truncated line is `INCOMPLETE`, bare LF and a
+blank header-block terminator are `INVALID`, and obsolete folding is not
+handled. A complete parse stops at its first CRLF and reports exact consumed
+bytes, leaving later bytes for a future layer.
+
+The finite limits are 256 name bytes, 3,837 returned value bytes after edge
+OWS trimming, and 4,096 total line bytes including CRLF. The result structure
+is 56 bytes and its span structure is 16 bytes on the tested 64-bit Linux
+ABI. Full header-block parsing is deferred to Task 035.
+
+_Next: MIGRATION_PLAN.md (incremental path + harness)._

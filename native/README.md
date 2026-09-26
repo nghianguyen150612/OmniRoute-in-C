@@ -1790,6 +1790,72 @@ Task 032 baseline byte-for-byte, and `nm` shows no request-line parser symbol
 linked into it. `npm run check:docs-all` passes; it reports 91 repository-wide
 potential stale-date/version drifts. `git diff --check` passes.
 
+## Bounded HTTP header-line parser (Task 034)
+
+Task 034 adds `include/omniroute/http_header_line.h` and
+`src/http_header_line.c`, a standalone parser for exactly one normal HTTP
+field line:
+
+```text
+field-name ":" OWS field-value OWS CRLF
+```
+
+It is built as the separate `omni_http_header_line` static library and linked
+only into `http-header-line-unit`. It is not connected to `main.c`, the event
+loop, connection dispatch, or production startup. Full header-block parsing,
+including the terminating blank line, is deferred to Task 035.
+
+`omni_http_header_line_parse(data, length)` accepts a nonempty HTTP token
+field-name and preserves its original case. The colon must immediately follow
+the name. After the colon it skips leading SP/HTAB and trims trailing SP/HTAB;
+interior whitespace remains in the borrowed value span. Empty values are
+valid. Field-value bytes are limited to HTAB, SP, and visible ASCII
+`0x21`–`0x7e`; NUL, other controls, DEL, and high bytes are rejected. Values
+are opaque: this parser does not interpret commas, quoting, or parameters.
+Obsolete line folding is unsupported.
+
+Only CRLF completes a line. A bare LF is invalid, while a viable prefix that
+ends before CRLF (including one ending after CR) returns `INCOMPLETE`. A
+complete result returns zero-copy name/value spans and exact `consumed_bytes`;
+bytes after that first CRLF are ignored. Returned spans are not
+NUL-terminated and remain valid only while the caller's input storage remains
+alive and unchanged. Non-success results expose no partial spans and consume
+zero bytes. `INVALID`, `TOO_LARGE`, and `ERR_INVALID_ARGUMENT` are distinct
+statuses with deterministic error offsets. A header-block blank line is
+`INVALID` here, not a field.
+
+The public limits are 256 field-name bytes, 3,837 returned field-value bytes,
+and 4,096 total line bytes. The total includes CRLF. The field-value limit
+counts the returned value after edge OWS is trimmed; total bytes also bound
+leading and trailing OWS. The parser is stateless and single-pass, performs no
+heap allocation or I/O, and has zero persistent parser state. On the tested
+64-bit Linux ABI, `sizeof(struct omni_http_header_line_span)` is 16 bytes and
+`sizeof(struct omni_http_header_line_result)` is 56 bytes.
+
+## Task 034 validation record
+
+`http-header-line-unit` reports 4,535 checks and zero failures. It covers
+borrowed pointer offsets, case preservation, extra bytes, empty values, OWS
+trimming, strict CRLF, blank-line rejection, null inputs, deterministic error
+offsets, exact limit boundaries, and input immutability. Every prefix of three
+valid field lines is tested using exact-size allocations. Deterministic byte
+classification checks all 256 octets in first and later name positions,
+first, interior, and trailing value positions: 77 name-first token octets,
+78 name-position cases including the colon delimiter, and 96 permitted value
+bytes. The test reports the 16-byte span, 56-byte result, and zero persistent
+parser state.
+
+Full native CTest passes 32/32 in GCC Debug, GCC Release, GCC Debug
+ASan+UBSan, Clang Debug, Clang Release, and Clang Debug ASan+UBSan; this
+includes all prior native suites. Both sanitizer configurations use
+`ASAN_OPTIONS=detect_leaks=1:halt_on_error=1` and
+`UBSAN_OPTIONS=halt_on_error=1`. The network/heap boundary gate passes with
+`http_header_line.c` included and rejects heap, unsafe C-string, and
+locale-sensitive parsing calls in that source. A GCC Release production
+executable builds; its `--version` and normal startup output match the Task
+033 baseline byte-for-byte, and `nm` confirms the header-line parser symbol
+is absent. `npm run check:docs-all` passes and `git diff --check` passes.
+
 ## Initial baseline (Task 011, measured 2026-09-19)
 
 Environment: Linux 7.2.4-zen2 x86_64, 8 CPUs, 16 GiB RAM; GCC 16.2.1,

@@ -308,3 +308,11 @@ target_link_libraries(test_http_request_line PRIVATE omni_http_request_line)
 omni_apply_native_flags(test_http_request_line)
 add_test(NAME http-request-line-unit COMMAND test_http_request_line)
 set_tests_properties(http-request-line-unit PROPERTIES TIMEOUT 60)
+
+# Bounded HTTP header-line parser (Task 034). Standalone and test-only; it
+# does not introduce header-block parsing or production startup wiring.
+add_executable(test_http_header_line test_http_header_line.c)
+target_link_libraries(test_http_header_line PRIVATE omni_http_header_line)
+omni_apply_native_flags(test_http_header_line)
+add_test(NAME http-header-line-unit COMMAND test_http_header_line)
+set_tests_properties(http-header-line-unit PROPERTIES TIMEOUT 60)

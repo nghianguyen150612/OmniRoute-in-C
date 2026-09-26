@@ -180,6 +180,11 @@ add_library(omni_connection_policy STATIC
 add_library(omni_http_request_line STATIC
   src/http_request_line.c)
 
+# Task 034's bounded header-line parser is a standalone protocol primitive;
+# it is linked only into its focused test and is not wired into startup.
+add_library(omni_http_header_line STATIC
+  src/http_header_line.c)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
@@ -206,6 +211,7 @@ target_include_directories(omni_listener_admission PUBLIC include)
 target_include_directories(omni_connection_dispatch PUBLIC include)
 target_include_directories(omni_connection_policy PUBLIC include)
 target_include_directories(omni_http_request_line PUBLIC include)
+target_include_directories(omni_http_header_line PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 target_link_libraries(omni_event_loop PUBLIC omni_runtime omni_reactor omni_registry omni_poller
@@ -255,6 +261,7 @@ omni_apply_native_flags(omni_listener_admission)
 omni_apply_native_flags(omni_connection_dispatch)
 omni_apply_native_flags(omni_connection_policy)
 omni_apply_native_flags(omni_http_request_line)
+omni_apply_native_flags(omni_http_header_line)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)
