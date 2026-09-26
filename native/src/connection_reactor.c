@@ -217,6 +217,38 @@ struct omni_connection_reactor_result omni_connection_reactor_detach(
   return make_result(OMNI_CONNECTION_REACTOR_OK, 0, token, 0u);
 }
 
+struct omni_connection_reactor_result omni_connection_reactor_update_interests(
+    struct omni_connection_reactor *adapter, uint64_t token, uint32_t interests) {
+  struct omni_connection_registry_handle handle;
+  struct omni_connection *connection = NULL;
+  struct omni_reactor_result reactor_result;
+
+  if (adapter == NULL || !adapter->live || adapter->reactor == NULL ||
+      adapter->registry == NULL || !adapter->reactor->live ||
+      !adapter->registry->live || token == 0u) {
+    return make_result(OMNI_CONNECTION_REACTOR_ERR_INVALID, EINVAL, token, 0u);
+  }
+  if (!handle_from_token(token, &handle)) {
+    return make_result(OMNI_CONNECTION_REACTOR_ERR_NOT_FOUND, ENOENT, token, 0u);
+  }
+  connection = omni_connection_registry_find(adapter->registry, handle);
+  if (connection == NULL) {
+    return make_result(OMNI_CONNECTION_REACTOR_ERR_NOT_FOUND, ENOENT, token, 0u);
+  }
+  if (omni_connection_state(connection) != OMNI_CONNECTION_OPEN ||
+      !omni_connection_is_live(connection)) {
+    return make_result(OMNI_CONNECTION_REACTOR_ERR_STATE, EINVAL, token, 0u);
+  }
+
+  reactor_result = omni_reactor_update_interests(adapter->reactor, token, interests);
+  if (reactor_result.status != OMNI_REACTOR_OK) {
+    return make_result(OMNI_CONNECTION_REACTOR_ERR_REACTOR,
+                       reactor_result.sys_errno, token, 0u);
+  }
+  connection->poller_interests = interests;
+  return make_result(OMNI_CONNECTION_REACTOR_OK, 0, token, 0u);
+}
+
 struct omni_connection_reactor_result omni_connection_reactor_dispatch(
     struct omni_connection_reactor *adapter, uint64_t token, uint32_t events) {
   struct omni_connection_registry_handle handle;

@@ -611,7 +611,8 @@ CLOSING` and is idempotent from `CLOSING`/`CLOSED`; destroy releases both
     representable unsigned 64-bit value.
     Permanently enabled WRITE interest can produce continuous readiness on
     common TCP sockets; tests configure it explicitly, and dynamic interest
-    synchronization is deferred to Task 032. The current 64-bit Linux ABI
+    synchronization was deferred to Task 032 and is implemented below. The
+    current 64-bit Linux ABI
     measures the bridge, config, and result as 152, 8, and 72 bytes. Its
     focused loopback test proves listener-admission through the existing
     connection reactor into the exact raw session receive buffer, a separate
@@ -619,6 +620,35 @@ CLOSING` and is idempotent from `CLOSING`/`CLOSED`; destroy releases both
     ownership, and 1,000 admit/read/release cycles with bounded manager and
     admission counts and a baseline FD census. It remains test-only; no HTTP,
     protocol, or production-startup behavior is introduced.
+  - Bounded connection lifecycle and reactor-interest policy implemented
+    (Task 032, `native/src/connection_policy.c`,
+    `omni_connection_policy_*`): consumes one Task 031 result or adapts one
+    connection-reactor callback; derives WRITE need from the existing session
+    send buffer; updates the existing poller registration through reactor and
+    connection-reactor forwarding while preserving its token and membership;
+    and delegates close-worthy release to Task 029 admission. READ stays
+    enabled for open connections; WRITE is enabled only for pending output,
+    remains enabled across WOULD_BLOCK, and is removed after the buffer drains.
+    INVALID, EOF, and fatal I/O release; ERROR/HANGUP trigger one bounded READ
+    probe first so buffered bytes are observed, with ERROR/HANGUP flags alone
+    not overriding a viable I/O result. Stale results are ignored before
+    close classification. The owner order is reactor/registry detach, session
+    teardown, connection/FD destruction, then admission-slot reuse. The
+    policy has no direct low-level calls, heap allocation, retained history,
+    or per-connection table and remains unlinked from production startup. On
+    the measured 64-bit Linux ABI the policy/config/result are 208/16/120
+    bytes; its loopback suite validates interest enable/drain/disable, exact
+    peer bytes, release failure reporting, listener and sibling survival,
+    generation-safe reuse, 1,000 admit/dispatch/interest-update/EOF-release
+    cycles, and baseline FD census. HTTP and protocol drain work remain
+    deferred. The final `connection-policy-unit` run reports 85 checks, zero
+    failures, and policy/config/result sizes of 208/16/120 bytes on the tested
+    64-bit Linux ABI. Full native CTest passes 30/30 in GCC Debug, GCC Release,
+    GCC Debug ASan+UBSan, Clang Debug, Clang Release, and Clang Debug ASan+UBSan;
+    the explicit network/heap boundary gate passes. The GCC Release production
+    executable builds and retains its version/startup output, with no Task
+    031/032 or networking symbols linked. `npm run check:docs-all` passes after
+    this documentation update, with only existing soft drift/count warnings.
 - Caches: global byte budget (e.g. single-digit MiB default on iOS, higher
   on Linux via config), per-cache caps, idle eviction; heavy caches
   (catalog, embeddings) releasable.

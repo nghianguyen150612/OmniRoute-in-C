@@ -125,6 +125,14 @@ struct omni_connection_reactor_result omni_connection_reactor_detach(
     struct omni_connection_reactor *adapter, struct omni_connection *connection);
 
 /*
+ * Update an attached connection by its current generation token. Poller and
+ * reactor membership/token remain intact; connection interest metadata is
+ * committed only after the reactor/poller update succeeds.
+ */
+struct omni_connection_reactor_result omni_connection_reactor_update_interests(
+    struct omni_connection_reactor *adapter, uint64_t token, uint32_t interests);
+
+/*
  * Translate one reactor callback into the connection callback. The token is
  * resolved through the registry and the callback is invoked synchronously
  * only for an attached OPEN connection. Stale, removed, closed, or otherwise

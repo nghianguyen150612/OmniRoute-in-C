@@ -1550,7 +1550,8 @@ admission, manager, runtime, and event-loop storage are separate.
 `omni_listener_admission` is linked only into `test_listener_admission`.
 `omniroute-native` startup remains unchanged: it starts no listener or
 production event loop. HTTP, protocol state, production daemon startup, and
-Task 032 remain deferred.
+Task 031 readiness dispatch and Task 032 lifecycle policy are documented
+below; production startup and protocol work remain deferred.
 
 ## Bounded managed connection readiness dispatch (Task 031)
 
@@ -1606,8 +1607,8 @@ The bridge preserves the connection's configured interest mask. A socket is
 often writable continuously, so permanent WRITE interest on connections with
 no queued data can keep a readiness loop busy. Tests that need WRITE readiness
 configure their connection explicitly with WRITE interest. Dynamic
-READ/WRITE interest synchronization and backpressure policy are deferred to
-Task 032.
+READ/WRITE interest synchronization and backpressure policy were deferred to
+Task 032; the policy section below now implements interest synchronization.
 
 The focused loopback suite proves the full listener-readiness admission path
 followed by connection READ readiness into the exact session receive buffer,
@@ -1645,6 +1646,90 @@ production executable target builds, `--version` still prints
 `omni_meminfo_read`, and runtime support symbols; no listener, reactor,
 manager, admission, session, or dispatch symbols are linked into the
 executable, and startup opens no listener.
+
+## Bounded connection lifecycle and reactor-interest policy (Task 032)
+
+Task 032 adds one explicit policy owner above the Task 031 dispatch result:
+`include/omniroute/connection_policy.h` and `src/connection_policy.c`.
+It is linked only into `test_connection_policy`; it is not wired into
+`main.c`, the production executable, or the native startup path.
+
+The connection-reactor callback can use
+`omni_connection_policy_callback()`, which calls the existing Task 031
+dispatcher once and applies its last result synchronously. ERROR or HANGUP
+readiness adds READ to that single bounded dispatch unless INVALID is also
+present. This allows pending bytes to be received, or EOF/fatal I/O to be
+surfaced, before lifecycle policy runs. INVALID suppresses all I/O and is
+close-worthy immediately. ERROR/HANGUP bits alone do not close a connection
+when the bounded READ result is viable; EOF, fatal I/O, peer-closed send
+results, and INVALID do. No second reactor step, retry, or recursive dispatch
+occurs.
+
+For a live connection the policy derives pending output from the existing
+session send byte buffer. Desired interests are always READ while the
+connection is open, plus WRITE only when that buffer has readable bytes.
+`omni_connection_policy_sync_interests()` is the explicit synchronization
+point after output is appended; `apply()` performs the same calculation after
+each dispatch. WRITE WOULD_BLOCK preserves pending bytes and READ|WRITE
+interest. When a write drains the buffer, the policy removes WRITE and leaves
+READ. It skips redundant updates when the desired mask already matches the
+connection metadata.
+
+Interest changes use the existing `omni_poller_update()` through the new
+`omni_reactor_update_interests()` and
+`omni_connection_reactor_update_interests()` forwarding operations. They
+resolve the existing generation token, keep registration and registry
+membership, update the poller first, then the reactor record and connection
+interest metadata. A poller failure leaves all three masks and the token
+unchanged. No new registration is created.
+
+Close-worthy policy calls `omni_connection_admission_release()` with the
+existing admission slot index and manager/reactor generation token. That owner
+detaches the reactor registration and registry membership through manager →
+runtime → connection-reactor, destroys the session bookkeeping, then destroys
+the connection owner and frees the admission slot. The policy never calls
+`close()` or duplicates release ordering. A release error is returned with
+its admission/manager status and errno; the result does not claim success.
+As connection-lifecycle cleanup, release destroys the session receive/send
+buffer objects and accepted connection owner; it does not parse, transform,
+or protocol-drain buffered input.
+
+Stale or ignored dispatch results are handled before close classification.
+They do not update interests or release a slot, including when an old result
+contains INVALID. The policy keeps no second per-connection table; it resolves
+the current admission slot by its existing generation token. Its lifecycle is
+`INERT -> ACTIVE -> CLOSED`; destroy clears borrowed references but does not
+release owners. Caller storage must remain alive while the reactor retains the
+policy callback context.
+
+The focused loopback proof covers listener readiness through admission,
+READ-only idle registration, exact binary output delivery, READ|WRITE enable,
+drain and WRITE removal, an idle zero-time probe with no repeated WRITE
+callback, EOF and reset-error cleanup, HANGUP with buffered bytes, stale-token
+reuse, update/release failures, listener and unrelated-connection survival,
+and 1,000 admit/dispatch/interest-update/release cycles with bounded manager,
+admission, poller/reactor registrations, and a baseline Linux FD census. On
+the current 64-bit Linux ABI, `struct omni_connection_policy`, config, and
+result measure 208, 16, and 120 bytes. The policy performs no allocation and
+retains no history or per-connection state. HTTP, protocol parsing, protocol
+drain semantics, and production serving remain deferred.
+
+## Task 032 validation record
+
+`connection-policy-unit` reports 85 checks, zero failures, and 64-bit Linux
+sizes of 208 bytes for the policy, 16 bytes for its config, and 120 bytes for
+its result. Full native CTest passes 30/30 in each final build: GCC Debug,
+GCC Release, GCC Debug ASan+UBSan, Clang Debug, Clang Release, and Clang Debug
+ASan+UBSan. Both sanitizer legs use
+`ASAN_OPTIONS=detect_leaks=1:halt_on_error=1` and
+`UBSAN_OPTIONS=halt_on_error=1`. The 1,000-cycle test returns the Linux FD
+census to baseline. The direct network/heap boundary gate passes and includes
+`connection_policy.c`. The GCC Release production executable builds, reports
+`omniroute-native 0.1.0`, and prints the existing release startup line; its
+symbol table contains `main` and `omni_meminfo_read` plus runtime support, with
+no Task 031/032 or networking symbols. `npm run check:docs-all` passes after
+this validation record was added; only the repository's pre-existing soft
+documentation drift/count warnings are reported.
 
 ## Initial baseline (Task 011, measured 2026-09-19)
 

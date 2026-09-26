@@ -287,3 +287,16 @@ target_link_libraries(test_connection_dispatch PRIVATE
 omni_apply_native_flags(test_connection_dispatch)
 add_test(NAME connection-dispatch-unit COMMAND test_connection_dispatch)
 set_tests_properties(connection-dispatch-unit PROPERTIES TIMEOUT 300)
+
+# Bounded managed-connection lifecycle policy (Task 032). Kept test-only.
+add_executable(test_connection_policy test_connection_policy.c)
+target_link_libraries(test_connection_policy PRIVATE
+  omni_connection_policy omni_connection_dispatch omni_connection_admission
+  omni_listener_admission omni_connection_manager omni_connection_runtime
+  omni_connection_session omni_connection_io omni_connection
+  omni_connection_reactor omni_reactor omni_registry omni_poller
+  omni_event_loop omni_runtime omni_listener omni_recv omni_send omni_accepted
+  omni_bytebuf)
+omni_apply_native_flags(test_connection_policy)
+add_test(NAME connection-policy-unit COMMAND test_connection_policy)
+set_tests_properties(connection-policy-unit PROPERTIES TIMEOUT 300)

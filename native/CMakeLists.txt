@@ -170,6 +170,11 @@ add_library(omni_listener_admission STATIC
 add_library(omni_connection_dispatch STATIC
   src/connection_dispatch.c)
 
+# The Task 032 lifecycle policy consumes dispatch results, updates reactor
+# interests, and releases connections through admission. It remains test-only.
+add_library(omni_connection_policy STATIC
+  src/connection_policy.c)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
@@ -194,6 +199,7 @@ target_include_directories(omni_connection_manager PUBLIC include)
 target_include_directories(omni_connection_admission PUBLIC include)
 target_include_directories(omni_listener_admission PUBLIC include)
 target_include_directories(omni_connection_dispatch PUBLIC include)
+target_include_directories(omni_connection_policy PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 target_link_libraries(omni_event_loop PUBLIC omni_runtime omni_reactor omni_registry omni_poller
@@ -241,6 +247,7 @@ omni_apply_native_flags(omni_connection_manager)
 omni_apply_native_flags(omni_connection_admission)
 omni_apply_native_flags(omni_listener_admission)
 omni_apply_native_flags(omni_connection_dispatch)
+omni_apply_native_flags(omni_connection_policy)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)

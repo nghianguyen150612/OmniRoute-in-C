@@ -121,6 +121,14 @@ struct omni_reactor_result omni_reactor_remove(struct omni_reactor *reactor,
                                                uint64_t token);
 
 /*
+ * Replace an attached registration's interest mask while preserving its
+ * descriptor, token, callback, context, and reactor membership. Poller failure
+ * leaves the registration record unchanged.
+ */
+struct omni_reactor_result omni_reactor_update_interests(
+    struct omni_reactor *reactor, uint64_t token, uint32_t interests);
+
+/*
  * Process one bounded wait/dispatch step. timeout_ms=0 probes; a positive
  * timeout bounds the single poller wait. Negative and >INT_MAX timeouts are
  * invalid. The step dispatches each event returned by the poller at most once,

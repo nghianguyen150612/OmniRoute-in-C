@@ -122,6 +122,17 @@ static enum omni_reactor_status map_remove_error(enum omni_poller_status status)
   }
 }
 
+static enum omni_reactor_status map_update_error(enum omni_poller_status status) {
+  switch (status) {
+    case OMNI_POLLER_ERR_NOT_FOUND:
+      return OMNI_REACTOR_ERR_NOT_FOUND;
+    case OMNI_POLLER_ERR_INVALID:
+      return OMNI_REACTOR_ERR_INVALID;
+    default:
+      return OMNI_REACTOR_ERR_WAIT;
+  }
+}
+
 static enum omni_reactor_status map_wait_error(enum omni_poller_status status) {
   switch (status) {
     case OMNI_POLLER_ERR_INVALID:
@@ -266,6 +277,32 @@ struct omni_reactor_result omni_reactor_remove(struct omni_reactor *reactor,
   reactor->count -= 1u;
   clear_registration(&reactor->registrations[reactor->count]);
 
+  return make_result(OMNI_REACTOR_OK, 0, 0u);
+}
+
+struct omni_reactor_result omni_reactor_update_interests(
+    struct omni_reactor *reactor, uint64_t token, uint32_t interests) {
+  struct omni_poller_result poller_result;
+  size_t index = 0u;
+
+  if (reactor == NULL || !reactor->live || reactor->poller == NULL ||
+      !reactor->poller->live || !interests_valid(interests)) {
+    return make_result(OMNI_REACTOR_ERR_INVALID, EINVAL, 0u);
+  }
+  index = find_token(reactor, token);
+  if (index == SIZE_MAX) {
+    return make_result(OMNI_REACTOR_ERR_NOT_FOUND, ENOENT, 0u);
+  }
+
+  /* The poller validates and commits first; the fixed reactor record follows
+   * only on success, keeping both masks unchanged on a recoverable failure. */
+  poller_result = omni_poller_update(reactor->poller,
+                                    reactor->registrations[index].fd, interests);
+  if (poller_result.status != OMNI_POLLER_OK) {
+    return make_result(map_update_error(poller_result.status),
+                       poller_result.sys_errno, 0u);
+  }
+  reactor->registrations[index].interests = interests;
   return make_result(OMNI_REACTOR_OK, 0, 0u);
 }
 
