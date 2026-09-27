@@ -330,3 +330,10 @@ target_link_libraries(test_http_request_framing PRIVATE omni_http_request_framin
 omni_apply_native_flags(test_http_request_framing)
 add_test(NAME http-request-framing-unit COMMAND test_http_request_framing)
 set_tests_properties(http-request-framing-unit PROPERTIES TIMEOUT 60)
+
+# Task 037 exposes fixed-length request bodies as borrowed spans; test-only.
+add_executable(test_http_request_body test_http_request_body.c)
+target_link_libraries(test_http_request_body PRIVATE omni_http_request_body)
+omni_apply_native_flags(test_http_request_body)
+add_test(NAME http-request-body-unit COMMAND test_http_request_body)
+set_tests_properties(http-request-body-unit PROPERTIES TIMEOUT 60)

@@ -46,7 +46,7 @@ no `-march=native`, no LTO.
 native/
   README.md                  # this file (build matrix, behavior, baseline)
   CMakeLists.txt             # Linux-first build described above
-  include/omniroute/         # version.h, exit_code.h, meminfo.h, arena.h, bytebuf.h, listener.h, poller.h, accepted.h, recv.h, send.h, connection.h, registry.h, reactor.h, connection_reactor.h, runtime.h, event_loop.h, connection_io.h, connection_session.h, connection_runtime.h, connection_manager.h, connection_admission.h, listener_admission.h, connection_dispatch.h, connection_policy.h, http_request_line.h
+  include/omniroute/         # native APIs, including bounded HTTP request-line, header-line, request-head, framing, and body-view primitives
   src/
     main.c                   # entry point, tiny CLI, lifecycle
     meminfo.c                # Linux /proc/self/status RSS hook (+ stub elsewhere)
@@ -72,6 +72,10 @@ native/
     connection_dispatch.c    # bounded manager/session readiness dispatch (Task 031)
     connection_policy.c      # bounded lifecycle and reactor-interest policy (Task 032)
     http_request_line.c      # bounded zero-copy HTTP request-line parser (Task 033)
+    http_header_line.c       # bounded zero-copy HTTP header-line parser (Task 034)
+    http_request_head.c      # bounded HTTP request-head composition (Task 035)
+    http_request_framing.c   # bounded HTTP framing analysis (Task 036)
+    http_request_body.c      # fixed-length HTTP body availability view (Task 037)
   tests/
     CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
     test_connection_manager.c # bounded manager unit, rollback, ownership, and stress checks
@@ -79,6 +83,7 @@ native/
     test_listener_admission.c # bounded reactor bridge and event-loop integration checks
     test_connection_dispatch.c # managed READ/WRITE dispatch and admission integration checks
     test_http_request_line.c   # bounded parser grammar, limits, and truncation checks
+    test_http_request_body.c   # body boundaries, availability, binary, and pipeline checks
     check_network_boundary.sh  # review gate: socket setup confined to src/listener.c,
                               # readiness wait to src/poller.c, accept path plus
                               # accepted-FD lifecycle to src/accepted.c, receive
@@ -2064,13 +2069,13 @@ Task 036 adds `omni_http_request_framing_analyze(head)`, a standalone,
 allocation-free analyzer over a logically complete Task 035 request-head
 result. It scans the fixed, at-most-64-header view once and does not reparse
 raw headers, read or inspect request-body bytes, or apply request-method body
-policy. It is not full HTTP request processing. Task 037 body handling remains
-deferred.
+policy. It is not full HTTP request processing. Task 037 below views complete
+fixed-length bodies and does not decode Transfer-Encoding.
 
 Header names are compared by explicit ASCII case folding only. Content-Length
 values accept decimal digits and comma-coalesced decimal members with SP/HTAB
 around members. Empty members, signs, internal whitespace, non-digits, and
-values above SIZE_MAX are invalid. Decimal accumulation checks overflow before
+values above the maximum representable size_t are invalid. Decimal accumulation checks overflow before
 multiplication. Equal duplicate fields and equal comma members are accepted;
 conflicting numeric values are rejected. `Content-Length: 0` remains an
 explicit fixed length of zero.
@@ -2081,9 +2086,9 @@ value. A Content-Length plus Transfer-Encoding combination is rejected as
 ambiguous. Failure precedence is malformed/overflowing Content-Length, then
 conflicting lengths, then CL/TE ambiguity, then TE unsupported. The outcome
 does not depend on header order. Unrelated fields do not affect framing.
-Without either framing field, the result is NO_BODY for any method.
+Without either framing field, the result is the no-body outcome for any method.
 
-The result reports status, NO_BODY or FIXED_LENGTH, length, Content-Length
+The result reports status, the no-body or fixed-length kind, length, Content-Length
 field count, Transfer-Encoding presence, and the relevant header index when
 one exists. A non-COMPLETE Task 035 result or inconsistent header view is
 rejected. The analyzer has no persistent state and uses O(1) additional
@@ -2108,3 +2113,51 @@ validation, and `git diff --check` pass. The GCC Release production executable
 has the same version and startup output as the Task 035 baseline; `nm` confirms
 `omni_http_request_framing_analyze` is absent from it. The analyzer remains
 standalone and test-only.
+
+## Bounded HTTP request-body view (Task 037)
+
+`omni_http_request_body_view(data, length, head, framing)` composes the
+complete Task 035 request-head result with the valid Task 036 framing result.
+It does not reparse headers or inspect body bytes. The input pointer and
+length describe the same contiguous request storage used to produce both
+results. The `COMPLETE`, `INCOMPLETE`, `UNSUPPORTED_FRAMING`,
+`INVALID_FRAMING`, `INVALID_ARGUMENT`, `INVALID_STATE`, and `OVERFLOW` statuses
+distinguish availability from invalid input metadata and unsupported framing.
+
+For the no-body case, the result completes at `head.consumed_bytes` with an
+empty span, even when bytes follow the head. For `FIXED_LENGTH(n)`, the body starts
+at that same boundary and has exactly `n` bytes. Explicit
+`Content-Length: 0` remains fixed-length framing and completes without
+requiring another byte. If fewer than `n` body bytes are available, the
+result is `INCOMPLETE`, exposes no partial span, consumes zero bytes, and
+reports `required_total_bytes = head.consumed_bytes + n`. The addition is
+checked against the maximum representable size_t; no arbitrary body-size cap is introduced here.
+
+On completion, `body` is a zero-copy borrowed span into the original input,
+and `consumed_bytes` is exactly the request-head boundary plus the fixed body
+length. Bytes after that count, including a pipelined next request, remain
+untouched. Body bytes are opaque binary data: NUL, high-bit values, and every
+other octet are accepted without string or encoding interpretation. The span
+is valid only while the original input storage stays alive and unchanged.
+Transfer-Encoding is returned as unsupported framing; malformed, conflicting,
+or ambiguous framing is rejected.
+
+Task 037 performs O(1) metadata checks and arithmetic, retains zero persistent
+bytes, and owns no caller body storage. On the tested 64-bit Linux ABI,
+`sizeof(struct omni_http_request_body_span)` is **16 bytes** and
+`sizeof(struct omni_http_request_body_result)` is **40 bytes**. The view does
+not consume a byte buffer or assemble fragmented input. Incremental
+receive-buffer assembly is deferred to Task 038; this primitive is not full
+HTTP request processing and remains standalone/test-only.
+
+Task 037 validation on Linux: `http-request-body-unit` passes **652 checks**,
+including raw Task 035-to-036-to-037 integration for no-body, fixed zero,
+fixed and binary lengths, incomplete bodies, trailing/pipelined bytes,
+unsupported TE, ambiguous framing, and invalid Content-Length cases. Every
+available body prefix is checked for declared lengths 1, 2, 5, and 16; all
+256 possible byte values are verified in one borrowed body span. The full
+**35/35 native CTest** suite, GCC/Clang Debug and Release builds, GCC/Clang
+Debug ASan+UBSan builds, canonical `npm run test:native`, network/heap/parser
+boundary, documentation validation, and whitespace checks pass. Production
+startup/version output is unchanged and `omni_http_request_body_view` is
+absent from the production executable; the body view remains test-only.

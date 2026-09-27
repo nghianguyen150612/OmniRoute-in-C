@@ -977,14 +977,14 @@ uses O(1) additional working storage. On the tested 64-bit Linux ABI,
 more than 64 headers and never reads body bytes.
 
 ASCII-only case-insensitive matching identifies Content-Length and
-Transfer-Encoding. Content-Length is checked decimal with SIZE_MAX overflow
+Transfer-Encoding. Content-Length is checked decimal with maximum-size_t overflow
 protection; equal duplicate and comma-coalesced member values are accepted,
 conflicts and malformed values are rejected. Transfer-Encoding alone is
 unsupported, while its presence with Content-Length is ambiguous and rejected.
 The defined precedence is invalid head, invalid Content-Length, conflicting
 Content-Length, CL/TE ambiguity, unsupported TE, then fixed length/no body.
-Explicit Content-Length zero remains FIXED_LENGTH(0). Body reading and
-Transfer-Encoding decoding are deferred to later work (Task 037).
+Explicit Content-Length zero remains FIXED_LENGTH(0). Task 037 below views
+complete fixed-length bodies without decoding Transfer-Encoding.
 
 Task 036 validation on Linux: `http-request-framing-unit` passes **2,082
 checks**, with **66 raw Task 035-to-036 integration cases**, **1,792 byte
@@ -1004,3 +1004,40 @@ validation, and `git diff --check` pass. The GCC Release production executable
 has the same version and startup output as the Task 035 baseline; `nm` confirms
 `omni_http_request_framing_analyze` is absent from it. The analyzer remains
 standalone and test-only.
+
+## Bounded HTTP request-body view (Task 037)
+
+`native/src/http_request_body.c` composes Task 035's complete request-head
+boundary with Task 036's framing result. It validates the constant-sized
+result metadata and performs checked `size_t` arithmetic; it does not reparse
+headers, inspect body bytes, consume a byte buffer, or retain any pointer.
+The caller supplies the same contiguous input storage used for the head and
+framing results.
+
+The no-body case completes at the head boundary with an empty body span. For
+`FIXED_LENGTH(n)`, completion requires `head.consumed_bytes + n` available
+bytes, checked against the maximum representable size_t; a short prefix is `INCOMPLETE`, has no body
+span, and consumes zero bytes while reporting the required total. Explicit
+`Content-Length: 0` stays fixed-length and needs no byte after the head. On
+success the body is a borrowed zero-copy span of exactly the declared length,
+and consumed bytes stop at its end. Trailing and pipelined bytes remain
+untouched. Body octets are opaque, including NUL and all high-bit values.
+Transfer-Encoding remains unsupported, and malformed, conflicting, or
+ambiguous framing is rejected. Task 037 adds no arbitrary body-size cap.
+
+The body span is valid only while the original input storage remains alive and
+unchanged. Persistent state is 0 bytes, caller body storage is 0 bytes, and
+working memory is O(1). On the tested 64-bit Linux ABI,
+`sizeof(struct omni_http_request_body_span)` is 16 bytes and
+`sizeof(struct omni_http_request_body_result)` is 40 bytes. Incremental
+receive-buffer assembly is deferred to Task 038. This is a standalone body
+availability primitive, not full HTTP request processing.
+
+Task 037 validation: `http-request-body-unit` passes 652 checks. It exercises
+raw Task 035-to-036-to-037 integration, every available body prefix for lengths
+1, 2, 5, and 16, zero-length and no-body requests, binary bodies, extra and
+pipelined bytes, unsupported Transfer-Encoding, invalid framing, overflow,
+caller metadata consistency, and input/header/result immutability. The full
+35/35 native CTest matrix passes in GCC and Clang Debug, Release, and Debug
+ASan+UBSan configurations. The body-view source is test-only and absent from
+the production executable.

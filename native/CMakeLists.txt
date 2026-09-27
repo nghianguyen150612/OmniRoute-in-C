@@ -194,6 +194,11 @@ add_library(omni_http_request_framing STATIC
   src/http_request_framing.c)
 target_link_libraries(omni_http_request_framing PUBLIC omni_http_request_head)
 
+# Task 037 views complete fixed-length bodies without copying or consuming input.
+add_library(omni_http_request_body STATIC
+  src/http_request_body.c)
+target_link_libraries(omni_http_request_body PUBLIC omni_http_request_framing)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
@@ -223,6 +228,7 @@ target_include_directories(omni_http_request_line PUBLIC include)
 target_include_directories(omni_http_header_line PUBLIC include)
 target_include_directories(omni_http_request_head PUBLIC include)
 target_include_directories(omni_http_request_framing PUBLIC include)
+target_include_directories(omni_http_request_body PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 target_link_libraries(omni_event_loop PUBLIC omni_runtime omni_reactor omni_registry omni_poller
@@ -275,6 +281,7 @@ omni_apply_native_flags(omni_http_request_line)
 omni_apply_native_flags(omni_http_header_line)
 omni_apply_native_flags(omni_http_request_head)
 omni_apply_native_flags(omni_http_request_framing)
+omni_apply_native_flags(omni_http_request_body)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)
