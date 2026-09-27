@@ -1041,3 +1041,63 @@ caller metadata consistency, and input/header/result immutability. The full
 35/35 native CTest matrix passes in GCC and Clang Debug, Release, and Debug
 ASan+UBSan configurations. The body-view source is test-only and absent from
 the production executable.
+
+## Bounded incremental HTTP request assembler (Task 038)
+
+`native/src/http_request.c` is the first composition layer over a live
+`omni_bytebuf`. `omni_http_request_assemble()` obtains the buffer's borrowed
+readable pointer and length, then performs exactly one Task 035 request-head
+parse, one Task 036 framing analysis, and one Task 037 body view. It does not
+copy, retain, reparse, or inspect bytes outside `[read, write)`. It does not
+wire into connection/session runtime code and does not perform I/O.
+
+The public result has a top-level status plus embedded Task 035, Task 036, and
+Task 037 results. Only `COMPLETE` exposes those child views as a logical request
+object. The terminal status mapping preserves the useful distinction between
+invalid request head, unsupported HTTP version, head-too-large,
+too-many-headers, invalid framing, unsupported Transfer-Encoding, body-size
+overflow, invalid argument, and invalid state. Every non-success result has
+`consumed_bytes == 0`; a head prefix reports `required_total_bytes == 0`, while
+a complete head with an incomplete fixed body reports Task 037's exact total.
+
+The caller supplies fixed header storage using the same Task 035 rules: a
+zero-header request may use `NULL, 0`, while `NULL` with positive capacity is
+invalid. The assembler never allocates or retains that array. Request-line,
+header name/value, and body spans borrow the current receive backing directly;
+there is no NUL termination and body octets remain opaque. On success,
+`consumed_bytes` and `required_total_bytes` are the exact complete request
+length relative to the current readable-region start. A no-body request ends
+at the head boundary, and a fixed-length request ends after exactly the
+declared body bytes. Trailing or pipelined bytes remain readable and are not
+parsed as a second request.
+
+The bytebuf is immutable during assembly: no consume, commit, compact, reset,
+or append operation is called. A consumed prefix is therefore ignored through
+the public readable-view API, and unused tail capacity cannot complete an
+incomplete request. Any returned borrowed view becomes invalid if the caller
+later consumes, compacts, resets, destroys, or otherwise moves/modifies the
+bytebuf backing storage, or reuses the header array. Actual consumption is
+deferred to Task 039.
+
+Persistent assembler state is **0 bytes**. Additional body storage is **0
+bytes**, and there is no per-request heap allocation. Work is bounded by the
+child primitives: O(request-head bytes + header count), with Task 037 body
+handling remaining O(1). On the tested 64-bit Linux ABI,
+`sizeof(struct omni_http_request_result)` is **208 bytes**;
+`sizeof(struct omni_http_request_head_result)` is 104 bytes,
+`sizeof(struct omni_http_request_framing_result)` is 40 bytes, and
+`sizeof(struct omni_http_request_body_result)` is 40 bytes. Caller header
+storage costs `header_capacity * sizeof(struct omni_http_header)` bytes.
+
+Task 038 validation: `http-request-unit` passes **828 checks**. The suite
+exercises every prefix of a request line and no-body request, fixed-body
+prefixes, exact and zero bodies, all 256 possible body octets, malformed and
+unsupported framing, conflicting Content-Length, TE plus Content-Length,
+caller-capacity canaries, exact and over global head limits, consumed-prefix
+read offsets, unused-tail sentinels, bytebuf/header immutability, trailing and
+pipelined requests, and deterministic head mutations. The focused test uses
+the real receive-buffer layout and verifies the complete Task 035 → Task 036 →
+Task 037 → Task 038 chain.
+The full **36/36 native CTest** matrix passes in GCC and Clang Debug, Release,
+and Debug ASan+UBSan configurations; the assembler remains test-only and is
+absent from the production executable.

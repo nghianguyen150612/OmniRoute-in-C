@@ -199,6 +199,12 @@ add_library(omni_http_request_body STATIC
   src/http_request_body.c)
 target_link_libraries(omni_http_request_body PUBLIC omni_http_request_framing)
 
+# Task 038 assembles one request from the current bytebuf readable region.
+# It remains standalone and test-only; no production startup wiring.
+add_library(omni_http_request STATIC
+  src/http_request.c)
+target_link_libraries(omni_http_request PUBLIC omni_http_request_body omni_bytebuf)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
@@ -229,6 +235,7 @@ target_include_directories(omni_http_header_line PUBLIC include)
 target_include_directories(omni_http_request_head PUBLIC include)
 target_include_directories(omni_http_request_framing PUBLIC include)
 target_include_directories(omni_http_request_body PUBLIC include)
+target_include_directories(omni_http_request PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 target_link_libraries(omni_event_loop PUBLIC omni_runtime omni_reactor omni_registry omni_poller
@@ -282,6 +289,7 @@ omni_apply_native_flags(omni_http_header_line)
 omni_apply_native_flags(omni_http_request_head)
 omni_apply_native_flags(omni_http_request_framing)
 omni_apply_native_flags(omni_http_request_body)
+omni_apply_native_flags(omni_http_request)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)

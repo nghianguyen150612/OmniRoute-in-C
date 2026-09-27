@@ -46,7 +46,7 @@ no `-march=native`, no LTO.
 native/
   README.md                  # this file (build matrix, behavior, baseline)
   CMakeLists.txt             # Linux-first build described above
-  include/omniroute/         # native APIs, including bounded HTTP request-line, header-line, request-head, framing, and body-view primitives
+  include/omniroute/         # native APIs, including bounded HTTP request-line, header-line, request-head, framing, body-view, and request-assembler primitives
   src/
     main.c                   # entry point, tiny CLI, lifecycle
     meminfo.c                # Linux /proc/self/status RSS hook (+ stub elsewhere)
@@ -76,6 +76,7 @@ native/
     http_request_head.c      # bounded HTTP request-head composition (Task 035)
     http_request_framing.c   # bounded HTTP framing analysis (Task 036)
     http_request_body.c      # fixed-length HTTP body availability view (Task 037)
+    http_request.c           # bounded incremental HTTP request assembler (Task 038)
   tests/
     CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
     test_connection_manager.c # bounded manager unit, rollback, ownership, and stress checks
@@ -2161,3 +2162,52 @@ Debug ASan+UBSan builds, canonical `npm run test:native`, network/heap/parser
 boundary, documentation validation, and whitespace checks pass. Production
 startup/version output is unchanged and `omni_http_request_body_view` is
 absent from the production executable; the body view remains test-only.
+
+## Bounded incremental HTTP request assembler (Task 038)
+
+`native/include/omniroute/http_request.h` exposes
+`omni_http_request_assemble(buffer, headers, header_capacity)`. It reads only
+the current readable region returned by `omni_bytebuf_read_ptr()` and composes
+Task 035 request-head parsing, Task 036 framing analysis, and Task 037
+fixed-length body availability. It remains standalone and test-only; no
+production connection, session, socket, routing, or request-processing wiring
+is added.
+
+The result distinguishes `COMPLETE`, `INCOMPLETE`, and terminal mapped errors:
+invalid request head, unsupported version, head limit, header capacity,
+invalid/unsupported framing, body overflow, invalid argument, and invalid
+state. A successful result exposes the complete request line, caller-owned
+parsed headers, framing result, borrowed body span, and exact
+`consumed_bytes`/`required_total_bytes`. A non-success result consumes zero
+bytes and exposes no logical request-head, framing, or body view. A short head
+reports an unknown required total (`0`); a short fixed body reports the exact
+total from Task 037.
+
+The assembler never consumes, commits, compacts, resets, or otherwise mutates
+the receive bytebuf. `consumed_bytes` is relative to the readable-region start,
+so a nonzero `read` offset is handled without parsing the consumed prefix.
+Trailing and pipelined bytes remain readable for a later caller. Header names,
+values, request-line spans, and body bytes are zero-copy; body bytes are opaque
+binary data and no NUL termination is added. All borrowed views become invalid
+if the caller later moves or modifies the backing storage or reuses the header
+array.
+
+The assembler has 0 bytes of persistent state, performs O(request-head bytes +
+header count) work, and adds no body storage or heap allocation. On the tested
+64-bit Linux ABI, `sizeof(struct omni_http_request_result)` is **208 bytes**;
+the embedded Task 035, Task 036, and Task 037 result sizes are 104, 40, and 40
+bytes. Caller header storage remains
+`header_capacity * sizeof(struct omni_http_header)` bytes. Actual bytebuf
+consumption is deliberately deferred to Task 039.
+
+Task 038 validation: `http-request-unit` passes **828 checks**. It covers empty
+and every request-line prefix, incomplete heads, valid headers, invalid and
+unsupported heads, fixed-length zero and short-body prefixes, binary bodies
+including all 256 byte values, unsupported Transfer-Encoding, conflicting and
+ambiguous framing, header-capacity canaries, exact/over head limits, read-offset
+prefixes, unused-tail sentinels, no-mutation snapshots, trailing and pipelined
+requests, and deterministic header mutations. The focused suite proves the
+raw bytebuf → Task 035 → Task 036 → Task 037 → Task 038 chain directly.
+The full **36/36 native CTest** matrix passes in GCC and Clang Debug, Release,
+and Debug ASan+UBSan configurations; Task 038 remains absent from the
+production executable.

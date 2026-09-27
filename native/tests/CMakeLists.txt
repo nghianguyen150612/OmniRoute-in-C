@@ -337,3 +337,10 @@ target_link_libraries(test_http_request_body PRIVATE omni_http_request_body)
 omni_apply_native_flags(test_http_request_body)
 add_test(NAME http-request-body-unit COMMAND test_http_request_body)
 set_tests_properties(http-request-body-unit PROPERTIES TIMEOUT 60)
+
+# Task 038 assembles exactly one request from a bounded bytebuf readable view.
+add_executable(test_http_request test_http_request.c)
+target_link_libraries(test_http_request PRIVATE omni_http_request omni_bytebuf)
+omni_apply_native_flags(test_http_request)
+add_test(NAME http-request-unit COMMAND test_http_request)
+set_tests_properties(http-request-unit PROPERTIES TIMEOUT 60)
