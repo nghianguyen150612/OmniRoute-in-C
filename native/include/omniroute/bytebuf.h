@@ -53,7 +53,7 @@
  * arrives after it. Zero-length operations are true no-ops and never
  * advance it. The counter is a local uint64_t: unsigned wrap at UINT64_MAX
  * follows C semantics and is documented as a limitation (a stale view
- * surviving 2^63 intervening invalidations is not a supported scenario).
+ * surviving 2^64 intervening invalidations is not a supported scenario).
  *
  * Byte semantics: raw bytes, no NUL appended, no text/UTF-8 assumption, no
  * strlen-based API. Embedded zero bytes are ordinary payload.
@@ -91,7 +91,7 @@ struct omni_bytebuf {
    * Advances on every successful nonzero consume, on every compact that
    * moves unread bytes or canonicalizes a drained buffer, and on reset.
    * Append/commit (tail growth) and zero-length operations never advance
-   * it. Zero only for non-live buffers; a live buffer starts at 1.
+   * it. A live buffer starts at 1; unsigned wrap may later produce zero.
    */
   uint64_t read_generation;
   bool owns_backing;
@@ -122,11 +122,11 @@ bool omni_bytebuf_init_owned(struct omni_bytebuf *buf, size_t capacity);
 const unsigned char *omni_bytebuf_read_ptr(const struct omni_bytebuf *buf, size_t *out_len);
 
 /*
- * Readable-view generation epoch of a live buffer: a nonzero identity that
+ * Readable-view generation epoch of a live buffer: an unsigned identity that
  * changes whenever an operation invalidates existing readable views (see
  * the generation note above). NULL or non-live buffer: 0. A live buffer
- * always reports a nonzero generation, so 0 unambiguously means "no live
- * readable view" to snapshot consumers such as Task 038/039.
+ * starts at 1 but wraps to 0 after UINT64_MAX; 0 alone does not prove that
+ * the buffer is non-live. Epoch identity repeats after 2^64 invalidations.
  */
 uint64_t omni_bytebuf_read_generation(const struct omni_bytebuf *buf);
 

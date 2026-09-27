@@ -65,8 +65,8 @@ struct omni_http_request_consume_result omni_http_request_consume(
      logical region, and a reset/refill can restore the exact old address.
      The snapshot's recorded epoch must still be the current one; any
      successful nonzero consume, meaningful compact, or reset advanced it.
-     A live buffer always has a nonzero generation, so a zero snapshot epoch
-     (a fabricated result) can never match here either. */
+     A live epoch starts at 1 but may wrap through zero after UINT64_MAX;
+     the equality check follows the bytebuf unsigned-wrap contract. */
   if (omni_bytebuf_read_generation(buffer) != request->source_read_generation) {
     result.status = OMNI_HTTP_REQUEST_CONSUME_ERR_STALE;
     return result;

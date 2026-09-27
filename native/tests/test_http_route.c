@@ -83,8 +83,8 @@ static struct fixture_snapshot snapshot_fixture(const struct fixture *fixture) {
   return snapshot;
 }
 
-static void check_unchanged(const struct fixture *fixture,
-                             const struct fixture_snapshot *snapshot, const char *label) {
+static void check_unchanged(const struct fixture *fixture, const struct fixture_snapshot *snapshot,
+                            const char *label) {
   check(memcmp(&fixture->buffer, &snapshot->buffer, sizeof(fixture->buffer)) == 0, label);
   check(memcmp(fixture->storage, snapshot->storage, sizeof(fixture->storage)) == 0,
         "bytebuf backing remains byte-identical");
@@ -106,9 +106,7 @@ static struct omni_http_route make_route(const char *method, const char *target,
   return route;
 }
 
-static const struct omni_http_route *empty_table(void) {
-  return NULL;
-}
+static const struct omni_http_route *empty_table(void) { return NULL; }
 
 /* ------------------------------------------------------------ empty table */
 
@@ -297,7 +295,8 @@ static void test_duplicate_exact_routes(void) {
   (void)memset(&fixture, 0, sizeof(fixture));
   table[0] = make_route("GET", "/x", 1u);
   table[1] = make_route("GET", "/x", 2u);
-  check(load_raw(&fixture, (const unsigned char *)"GET /x HTTP/1.1\r\n\r\n", 19u), "duplicate-adjacent fixture loads");
+  check(load_raw(&fixture, (const unsigned char *)"GET /x HTTP/1.1\r\n\r\n", 19u),
+        "duplicate-adjacent fixture loads");
   result = assemble(&fixture);
   check(result.status == OMNI_HTTP_REQUEST_COMPLETE, "duplicate-adjacent request completes");
   matched = omni_http_route_match(&result, table, 2u);
@@ -318,7 +317,8 @@ static void test_duplicate_separated_by_unrelated_routes(void) {
   table[0] = make_route("GET", "/x", 1u);
   table[1] = make_route("POST", "/v1/chat/completions", 3u);
   table[2] = make_route("GET", "/x", 2u);
-  check(load_raw(&fixture, (const unsigned char *)"GET /x HTTP/1.1\r\n\r\n", 19u), "duplicate-separated fixture loads");
+  check(load_raw(&fixture, (const unsigned char *)"GET /x HTTP/1.1\r\n\r\n", 19u),
+        "duplicate-separated fixture loads");
   result = assemble(&fixture);
   check(result.status == OMNI_HTTP_REQUEST_COMPLETE, "duplicate-separated request completes");
   matched = omni_http_route_match(&result, table, 3u);
@@ -336,7 +336,8 @@ static void test_duplicate_identical_tokens_still_ambiguous(void) {
   (void)memset(&fixture, 0, sizeof(fixture));
   table[0] = make_route("GET", "/x", 5u);
   table[1] = make_route("GET", "/x", 5u);
-  check(load_raw(&fixture, (const unsigned char *)"GET /x HTTP/1.1\r\n\r\n", 19u), "duplicate-identical fixture loads");
+  check(load_raw(&fixture, (const unsigned char *)"GET /x HTTP/1.1\r\n\r\n", 19u),
+        "duplicate-identical fixture loads");
   result = assemble(&fixture);
   matched = omni_http_route_match(&result, table, 2u);
   check(matched.status == OMNI_HTTP_ROUTE_AMBIGUOUS_ROUTE,
@@ -360,14 +361,16 @@ static void test_route_order_independence(void) {
   reversed[1] = make_route("POST", "/x", 9u);
 
   /* POST /x must match in both orders (no early METHOD_NOT_ALLOWED). */
-  check(load_raw(&fixture, (const unsigned char *)"POST /x HTTP/1.1\r\n\r\n", 20u), "order fixture loads POST /x");
+  check(load_raw(&fixture, (const unsigned char *)"POST /x HTTP/1.1\r\n\r\n", 20u),
+        "order fixture loads POST /x");
   result = assemble(&fixture);
   matched = omni_http_route_match(&result, forward, 2u);
   check(matched.status == OMNI_HTTP_ROUTE_MATCH && matched.route_token == 9u,
         "POST /x matches with POST-first order");
   omni_bytebuf_destroy(&fixture.buffer);
 
-  check(load_raw(&fixture, (const unsigned char *)"POST /x HTTP/1.1\r\n\r\n", 20u), "order fixture reloads POST /x");
+  check(load_raw(&fixture, (const unsigned char *)"POST /x HTTP/1.1\r\n\r\n", 20u),
+        "order fixture reloads POST /x");
   result = assemble(&fixture);
   matched = omni_http_route_match(&result, reversed, 2u);
   check(matched.status == OMNI_HTTP_ROUTE_MATCH && matched.route_token == 9u,
@@ -375,14 +378,16 @@ static void test_route_order_independence(void) {
   omni_bytebuf_destroy(&fixture.buffer);
 
   /* GET /x must match in both orders too. */
-  check(load_raw(&fixture, (const unsigned char *)"GET /x HTTP/1.1\r\n\r\n", 19u), "order fixture loads GET /x");
+  check(load_raw(&fixture, (const unsigned char *)"GET /x HTTP/1.1\r\n\r\n", 19u),
+        "order fixture loads GET /x");
   result = assemble(&fixture);
   matched = omni_http_route_match(&result, forward, 2u);
   check(matched.status == OMNI_HTTP_ROUTE_MATCH && matched.route_token == 8u,
         "GET /x matches with POST-first order");
   omni_bytebuf_destroy(&fixture.buffer);
 
-  check(load_raw(&fixture, (const unsigned char *)"GET /x HTTP/1.1\r\n\r\n", 19u), "order fixture reloads GET /x");
+  check(load_raw(&fixture, (const unsigned char *)"GET /x HTTP/1.1\r\n\r\n", 19u),
+        "order fixture reloads GET /x");
   result = assemble(&fixture);
   matched = omni_http_route_match(&result, reversed, 2u);
   check(matched.status == OMNI_HTTP_ROUTE_MATCH && matched.route_token == 8u,
@@ -390,14 +395,16 @@ static void test_route_order_independence(void) {
   omni_bytebuf_destroy(&fixture.buffer);
 
   /* A method-only mismatch must be METHOD_NOT_ALLOWED in both orders. */
-  check(load_raw(&fixture, (const unsigned char *)"DELETE /x HTTP/1.1\r\n\r\n", 22u), "order fixture loads DELETE /x");
+  check(load_raw(&fixture, (const unsigned char *)"DELETE /x HTTP/1.1\r\n\r\n", 22u),
+        "order fixture loads DELETE /x");
   result = assemble(&fixture);
   matched = omni_http_route_match(&result, forward, 2u);
   check(matched.status == OMNI_HTTP_ROUTE_METHOD_NOT_ALLOWED,
         "DELETE /x is METHOD_NOT_ALLOWED with POST-first order");
   omni_bytebuf_destroy(&fixture.buffer);
 
-  check(load_raw(&fixture, (const unsigned char *)"DELETE /x HTTP/1.1\r\n\r\n", 22u), "order fixture reloads DELETE /x");
+  check(load_raw(&fixture, (const unsigned char *)"DELETE /x HTTP/1.1\r\n\r\n", 22u),
+        "order fixture reloads DELETE /x");
   result = assemble(&fixture);
   matched = omni_http_route_match(&result, reversed, 2u);
   check(matched.status == OMNI_HTTP_ROUTE_METHOD_NOT_ALLOWED,
@@ -426,7 +433,8 @@ static void test_invalid_route_entries(void) {
   table[0] = make_route("GET", "/health", 1u);
   table[0].method_length = 0u;
   matched = omni_http_route_match(&result, table, 1u);
-  check(matched.status == OMNI_HTTP_ROUTE_ERR_INVALID_ROUTE, "zero method length is an invalid route");
+  check(matched.status == OMNI_HTTP_ROUTE_ERR_INVALID_ROUTE,
+        "zero method length is an invalid route");
 
   table[0] = make_route("GET", "/health", 1u);
   table[0].target = NULL;
@@ -436,7 +444,8 @@ static void test_invalid_route_entries(void) {
   table[0] = make_route("GET", "/health", 1u);
   table[0].target_length = 0u;
   matched = omni_http_route_match(&result, table, 1u);
-  check(matched.status == OMNI_HTTP_ROUTE_ERR_INVALID_ROUTE, "zero target length is an invalid route");
+  check(matched.status == OMNI_HTTP_ROUTE_ERR_INVALID_ROUTE,
+        "zero target length is an invalid route");
 
   /* A NULL table with a nonzero count is an argument error. */
   matched = omni_http_route_match(&result, NULL, 1u);
@@ -454,20 +463,20 @@ static void test_route_count_bound(void) {
   struct omni_http_route table[OMNI_HTTP_ROUTE_MAX_ROUTES + 1u];
   struct omni_http_request_result result;
   struct omni_http_route_result matched;
+  char methods[OMNI_HTTP_ROUTE_MAX_ROUTES + 1u][8];
+  char targets[OMNI_HTTP_ROUTE_MAX_ROUTES + 1u][24];
   size_t i;
 
   (void)memset(&fixture, 0, sizeof(fixture));
   for (i = 0u; i < OMNI_HTTP_ROUTE_MAX_ROUTES + 1u; ++i) {
-    char method[8];
-    char target[24];
-    int written = snprintf(method, sizeof(method), "M%zu", i % 4u);
-    int twritten = snprintf(target, sizeof(target), "/r/%zu", i);
+    int written = snprintf(methods[i], sizeof(methods[i]), "M%zu", i % 4u);
+    int twritten = snprintf(targets[i], sizeof(targets[i]), "/r/%zu", i);
 
     if (written < 0 || twritten < 0) {
       check(false, "route-count fixture formats");
       return;
     }
-    table[i] = make_route(method, target, (uint64_t)(1000u + i));
+    table[i] = make_route(methods[i], targets[i], (uint64_t)(1000u + i));
   }
   check(load_raw(&fixture, REQ_HEALTH, sizeof(REQ_HEALTH) - 1u), "route-count fixture loads");
   result = assemble(&fixture);
@@ -489,6 +498,15 @@ static void test_route_count_bound(void) {
         "MAX_ROUTES+1 is rejected as too many routes");
   check(matched.route_index == 0u && matched.route_token == 0u,
         "too-many-routes reports no index or token");
+  matched = omni_http_route_match(&result, table, SIZE_MAX);
+  check(matched.status == OMNI_HTTP_ROUTE_ERR_TOO_MANY_ROUTES,
+        "SIZE_MAX count rejects before any table arithmetic");
+  {
+    const struct omni_http_route one = make_route("GET", "/health", 7u);
+    matched = omni_http_route_match(&result, &one, OMNI_HTTP_ROUTE_MAX_ROUTES + 1u);
+    check(matched.status == OMNI_HTTP_ROUTE_ERR_TOO_MANY_ROUTES,
+          "over-limit count does not scan even a one-entry allocation");
+  }
   omni_bytebuf_destroy(&fixture.buffer);
 }
 
@@ -499,19 +517,21 @@ static void test_invalid_request_results(void) {
   struct omni_http_route table[1];
   static const unsigned char partial[] = "GET /health HTTP/1.1";
   static const unsigned char bad_head[] = "GET / HTTP/1.1\r\nBad Header\r\n\r\n";
-  static const unsigned char bad_framing[] =
-      "POST / HTTP/1.1\r\nContent-Length: nope\r\n\r\n";
-  static const unsigned char *const inputs[3] = {partial, bad_head, bad_framing};
-  static const size_t lengths[3] = {
+  static const unsigned char bad_framing[] = "POST / HTTP/1.1\r\nContent-Length: nope\r\n\r\n";
+  static const unsigned char unsupported[] =
+      "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+  static const unsigned char *const inputs[4] = {partial, bad_head, bad_framing, unsupported};
+  static const size_t lengths[4] = {
       sizeof(partial) - 1u,
       sizeof(bad_head) - 1u,
       sizeof(bad_framing) - 1u,
+      sizeof(unsupported) - 1u,
   };
   size_t i;
 
   (void)memset(&fixture, 0, sizeof(fixture));
   table[0] = make_route("GET", "/health", 1u);
-  for (i = 0u; i < 3u; ++i) {
+  for (i = 0u; i < 4u; ++i) {
     struct omni_http_request_result result;
     struct omni_http_route_result matched;
 
@@ -563,6 +583,94 @@ static void test_invalid_request_results(void) {
   omni_bytebuf_destroy(&fixture.buffer);
 }
 
+/* Contradictory COMPLETE child metadata must fail before byte comparisons. */
+static void test_complete_metadata_consistency(void) {
+  struct fixture fixture = {0};
+  struct omni_http_route route = make_route("GET", "/health", 1u);
+  struct omni_http_request_result baseline;
+  check(load_raw(&fixture, REQ_HEALTH, sizeof(REQ_HEALTH) - 1u), "metadata fixture loads");
+  baseline = assemble(&fixture);
+  for (size_t variant = 0u; variant < 16u; ++variant) {
+    struct omni_http_request_result forged = baseline;
+    switch (variant) {
+    case 0:
+      forged.framing.status = OMNI_HTTP_REQUEST_FRAMING_AMBIGUOUS;
+      break;
+    case 1:
+      forged.framing.transfer_encoding_present = true;
+      break;
+    case 2:
+      forged.body.status = OMNI_HTTP_REQUEST_BODY_INCOMPLETE;
+      break;
+    case 3:
+      forged.consumed_bytes += 1u;
+      break;
+    case 4:
+      forged.required_total_bytes += 1u;
+      break;
+    case 5:
+      forged.source_readable_length = 0u;
+      break;
+    case 6:
+      forged.source_read_ptr = NULL;
+      break;
+    case 7:
+      forged.request_head.request_line.method.length = SIZE_MAX;
+      break;
+    case 8:
+      forged.request_head.request_line.target.length = SIZE_MAX;
+      break;
+    case 9:
+      forged.request_head.request_line.version = OMNI_HTTP_VERSION_UNKNOWN;
+      break;
+    case 10:
+      forged.request_head.request_line.consumed_bytes = 0u;
+      break;
+    case 11:
+      forged.request_head.consumed_bytes = 0u;
+      break;
+    case 12:
+      forged.body.body.length = 1u;
+      break;
+    case 13:
+      forged.body.body.data = NULL;
+      break;
+    case 14:
+      forged.request_head.request_line.method.data += 1u;
+      break;
+    case 15:
+      forged.request_head.request_line.target.data += 1u;
+      break;
+    }
+    struct omni_http_route_result matched = omni_http_route_match(&forged, &route, 1u);
+    check(matched.status == OMNI_HTTP_ROUTE_ERR_INVALID_REQUEST,
+          "contradictory COMPLETE metadata is rejected");
+    check(matched.route_index == 0u && matched.route_token == 0u,
+          "invalid COMPLETE metadata exposes no match");
+  }
+  omni_bytebuf_destroy(&fixture.buffer);
+}
+
+/* Duplicate definitions invalidate the table even for another request. */
+static void test_unrelated_duplicates(void) {
+  struct fixture fixture = {0};
+  struct omni_http_route routes[3] = {make_route("GET", "/x", 1u), make_route("GET", "/health", 2u),
+                                      make_route("GET", "/x", 3u)};
+  const unsigned char *inputs[] = {REQ_HEALTH, REQ_WRONG_METHOD, REQ_UNKNOWN};
+  const size_t lengths[] = {sizeof(REQ_HEALTH) - 1u, sizeof(REQ_WRONG_METHOD) - 1u,
+                            sizeof(REQ_UNKNOWN) - 1u};
+  for (size_t i = 0u; i < 3u; ++i) {
+    check(load_raw(&fixture, inputs[i], lengths[i]), "unrelated-duplicate fixture loads");
+    struct omni_http_request_result request = assemble(&fixture);
+    struct omni_http_route_result result = omni_http_route_match(&request, routes, 3u);
+    check(result.status == OMNI_HTTP_ROUTE_AMBIGUOUS_ROUTE,
+          "unrelated duplicate invalidates every request classification");
+    check(result.route_token == 0u && result.route_index == 0u,
+          "unrelated ambiguity exposes no match");
+    omni_bytebuf_destroy(&fixture.buffer);
+  }
+}
+
 /* ------------------------------------------- real Task038 -> Task040 flow */
 
 static void test_task038_integration(void) {
@@ -584,7 +692,8 @@ static void test_task038_integration(void) {
         "integration routes GET /health");
   omni_bytebuf_destroy(&fixture.buffer);
 
-  check(load_raw(&fixture, REQ_MODELS, sizeof(REQ_MODELS) - 1u), "integration loads GET /v1/models");
+  check(load_raw(&fixture, REQ_MODELS, sizeof(REQ_MODELS) - 1u),
+        "integration loads GET /v1/models");
   result = assemble(&fixture);
   matched = omni_http_route_match(&result, table, 3u);
   check(matched.status == OMNI_HTTP_ROUTE_MATCH && matched.route_token == 2u,
@@ -599,7 +708,8 @@ static void test_task038_integration(void) {
         "integration routes POST /v1/chat/completions");
   omni_bytebuf_destroy(&fixture.buffer);
 
-  check(load_raw(&fixture, REQ_UNKNOWN, sizeof(REQ_UNKNOWN) - 1u), "integration loads GET /missing");
+  check(load_raw(&fixture, REQ_UNKNOWN, sizeof(REQ_UNKNOWN) - 1u),
+        "integration loads GET /missing");
   result = assemble(&fixture);
   matched = omni_http_route_match(&result, table, 3u);
   check(matched.status == OMNI_HTTP_ROUTE_NOT_FOUND, "integration classifies unknown target");
@@ -652,8 +762,7 @@ static void test_task039_lifecycle_integration(void) {
   check(matched.status == OMNI_HTTP_ROUTE_MATCH && matched.route_token == 2u,
         "lifecycle routes the next request after consuming the first");
   consumed = omni_http_request_consume(&fixture.buffer, &second);
-  check(consumed.status == OMNI_HTTP_REQUEST_CONSUME_OK &&
-            consumed.consumed_bytes == second_length,
+  check(consumed.status == OMNI_HTTP_REQUEST_CONSUME_OK && consumed.consumed_bytes == second_length,
         "lifecycle consumes B exactly");
   check(omni_bytebuf_readable(&fixture.buffer) == 0u, "lifecycle drains the pipeline");
 
@@ -679,8 +788,7 @@ static void test_binary_body_independence(void) {
         "binary-body fixture loads");
   result = assemble(&fixture);
   check(result.status == OMNI_HTTP_REQUEST_COMPLETE, "binary-body request completes");
-  check(result.body.body.length == 4u &&
-            memcmp(result.body.body.data, "\x00\x7f\x80\xff", 4u) == 0,
+  check(result.body.body.length == 4u && memcmp(result.body.body.data, "\x00\x7f\x80\xff", 4u) == 0,
         "binary body bytes are intact");
   matched = omni_http_route_match(&result, table, 1u);
   check(matched.status == OMNI_HTTP_ROUTE_MATCH && matched.route_token == 4u,
@@ -824,20 +932,16 @@ static void test_stress_1000_lifecycle_cycles(void) {
   static const unsigned char *const requests[5] = {REQ_HEALTH, REQ_WRONG_METHOD, REQ_UNKNOWN,
                                                    REQ_MODELS, REQ_CHAT};
   static const size_t lengths[5] = {
-      sizeof(REQ_HEALTH) - 1u,
-      sizeof(REQ_WRONG_METHOD) - 1u,
-      sizeof(REQ_UNKNOWN) - 1u,
-      sizeof(REQ_MODELS) - 1u,
-      sizeof(REQ_CHAT) - 1u,
+      sizeof(REQ_HEALTH) - 1u, sizeof(REQ_WRONG_METHOD) - 1u, sizeof(REQ_UNKNOWN) - 1u,
+      sizeof(REQ_MODELS) - 1u, sizeof(REQ_CHAT) - 1u,
   };
   static const enum omni_http_route_status expected[5] = {
-      OMNI_HTTP_ROUTE_MATCH,
-      OMNI_HTTP_ROUTE_METHOD_NOT_ALLOWED,
-      OMNI_HTTP_ROUTE_NOT_FOUND,
-      OMNI_HTTP_ROUTE_MATCH,
+      OMNI_HTTP_ROUTE_MATCH,     OMNI_HTTP_ROUTE_METHOD_NOT_ALLOWED,
+      OMNI_HTTP_ROUTE_NOT_FOUND, OMNI_HTTP_ROUTE_MATCH,
       OMNI_HTTP_ROUTE_MATCH,
   };
   static const uint64_t tokens[5] = {1u, 0u, 0u, 2u, 3u};
+  struct omni_http_route reversed[3];
   size_t cycles_ok = 0u;
   size_t bytes_total = 0u;
   size_t bytes_expected;
@@ -847,6 +951,9 @@ static void test_stress_1000_lifecycle_cycles(void) {
   table[0] = make_route("GET", "/health", 1u);
   table[1] = make_route("GET", "/v1/models", 2u);
   table[2] = make_route("POST", "/v1/chat/completions", 3u);
+  for (i = 0u; i < 3u; ++i) {
+    reversed[i] = table[2u - i];
+  }
   check(omni_bytebuf_init_borrowed(&fixture.buffer, fixture.storage, sizeof(fixture.storage)),
         "stress buffer initializes");
   (void)memset(fixture.storage, 0xa5, sizeof(fixture.storage));
@@ -872,6 +979,11 @@ static void test_stress_1000_lifecycle_cycles(void) {
       check(false, "stress classification is exact for every variant");
       break;
     }
+    {
+      struct omni_http_route_result reordered = omni_http_route_match(&result, reversed, 3u);
+      check(reordered.status == matched.status && reordered.route_token == matched.route_token,
+            "stress classification is independent of route order");
+    }
     /* Routing status does not affect consumability: every COMPLETE view is
        consumed exactly once, so no byte is lost or double-consumed. */
     consumed = omni_http_request_consume(&fixture.buffer, &result);
@@ -884,17 +996,23 @@ static void test_stress_1000_lifecycle_cycles(void) {
       check(false, "stress consume drains each request fully");
       break;
     }
+    {
+      struct omni_http_request_consume_result stale =
+          omni_http_request_consume(&fixture.buffer, &result);
+      check(stale.status == OMNI_HTTP_REQUEST_CONSUME_ERR_STALE && stale.consumed_bytes == 0u,
+            "stress rejects a second consume without byte loss");
+    }
     ++cycles_ok;
     bytes_total += lengths[variant];
   }
   check(cycles_ok == (size_t)CYCLES, "all 1000 assemble/route/consume cycles succeed");
   /* Each of the 5 variants appears exactly CYCLES/5 times. */
-  bytes_expected = ((size_t)CYCLES / 5u) * (lengths[0] + lengths[1] + lengths[2] + lengths[3] +
-                                            lengths[4]);
+  bytes_expected =
+      ((size_t)CYCLES / 5u) * (lengths[0] + lengths[1] + lengths[2] + lengths[3] + lengths[4]);
   check(bytes_total == bytes_expected, "stress consumed every appended byte exactly once");
   check(omni_bytebuf_readable(&fixture.buffer) == 0u, "stress ends with an empty readable region");
-  check(omni_bytebuf_high_water(&fixture.buffer) <= lengths[0] + lengths[1] + lengths[2] +
-                                                        lengths[3] + lengths[4],
+  check(omni_bytebuf_high_water(&fixture.buffer) <=
+            lengths[0] + lengths[1] + lengths[2] + lengths[3] + lengths[4],
         "stress high water stays bounded: no heap growth, no byte loss");
   check(omni_bytebuf_capacity(&fixture.buffer) == sizeof(fixture.storage),
         "stress never reallocates or grows the buffer");
@@ -917,6 +1035,8 @@ int main(void) {
   test_invalid_route_entries();
   test_route_count_bound();
   test_invalid_request_results();
+  test_complete_metadata_consistency();
+  test_unrelated_duplicates();
   test_task038_integration();
   test_task039_lifecycle_integration();
   test_binary_body_independence();

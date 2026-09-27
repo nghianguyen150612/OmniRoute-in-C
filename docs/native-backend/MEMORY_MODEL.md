@@ -340,7 +340,10 @@ recovery RSS: …  VmHWM: …  Threads: …  FDs: …
     readable view stays valid across tail growth while same-address reuse
     after a consume-to-empty, compaction, or reset/refill is detectable.
     Unsigned wrap at `UINT64_MAX` follows C semantics (documented
-    limitation). Task 017 adds `native/src/recv.c` as the allocation-free
+    limitation: the next epoch is 0 and identity repeats after 2^64
+    invalidations). On the measured 64-bit Linux ABI, `struct omni_bytebuf`
+    is **56 bytes** including the epoch and flag padding. Task 017 adds
+    `native/src/recv.c` as the allocation-free
     consumer: one nonblocking `recv()` writes directly into the writable
     tail and commits the exact positive count; bounded drain, EOF,
     would-block, buffer-full, and fatal receive outcomes remain explicit.
@@ -1105,8 +1108,8 @@ Persistent assembler state is **0 bytes**. Additional body storage is **0
 bytes**, and there is no per-request heap allocation. Work is bounded by the
 child primitives: O(request-head bytes + header count), with Task 037 body
 handling remaining O(1). On the tested 64-bit Linux ABI,
-`sizeof(struct omni_http_request_result)` is **224 bytes** — 208 at the Task 038
-baseline plus 16 bytes for the snapshot pointer and length;
+`sizeof(struct omni_http_request_result)` is **232 bytes** — 208 at the Task 038
+baseline plus 24 bytes for the snapshot pointer, length, and generation;
 `sizeof(struct omni_http_request_head_result)` is 104 bytes,
 `sizeof(struct omni_http_request_framing_result)` is 40 bytes, and
 `sizeof(struct omni_http_request_body_result)` is 40 bytes. Caller header
@@ -1252,22 +1255,27 @@ validated (non-NULL, nonempty method and target spans); a malformed entry is
 `ERR_INVALID_ROUTE`, never skipped. Only a logically COMPLETE Task 038 result
 is routable — complete request line, nonempty method and target spans, nonzero
 `consumed_bytes`; INCOMPLETE, parse-error, framing-error, and forged COMPLETE
-shapes are rejected with `ERR_INVALID_REQUEST`. Headers and body bytes are
+shapes are rejected with `ERR_INVALID_REQUEST`. Validation reuses Task 037
+metadata checks without reading header or body bytes. Headers and body bytes are
 never inspected, so routing depends only on the exact method and target bytes.
 
 Persistent matcher state is **0 bytes**, with **no heap allocation** and O(1)
-working memory. Work is O(R × compared method/target bytes) with R ≤ 64 — no
-trie, no hash table, no route-index construction. On the tested 64-bit Linux
+working memory. Classification is O(R × compared method/target bytes);
+whole-table duplicate validation checks at most R(R−1)/2 pairs, capped at
+**2,016** for 64 routes. Total work is bounded by
+O(R × MAX_ROUTES × compared bytes), with the public maximum fixed at 64 —
+no trie, no hash table, no route-index construction. On the tested 64-bit Linux
 ABI, `sizeof(struct omni_http_route)` is **40 bytes** (two 16-byte spans plus
 an 8-byte token) and `sizeof(struct omni_http_route_result)` is **24 bytes**
 (status, index, token). The route table itself is caller-owned storage, not
 matcher memory.
 
-Task 040 validation: `http-route-unit` passes **3,723 checks**. It covers the
+Task 040 validation: `http-route-unit` passes **5,770 checks**. It covers the
 empty table, single and multiple exact matches, method mismatch, unknown
 targets, method and target case sensitivity, prefix/suffix/trailing-slash/
 query rejection, adjacent and separated duplicate ambiguity (including
-identical-token duplicates), route-order independence, every invalid route
+identical-token and request-unrelated duplicates), route-order independence,
+every invalid route
 entry shape, the exact `MAX_ROUTES` bound and `MAX_ROUTES+1` rejection, real
 INCOMPLETE/invalid-head/framing-error and forged COMPLETE request results, raw
 Task 038 → Task 040 integration for every classification, the full
@@ -1276,7 +1284,8 @@ independence (NUL/high octets), unrelated and duplicate header independence,
 request/result/header/bytebuf/route-table immutability, a 14-position ×
 255-value deterministic byte-mutation sweep over the method and target spans,
 and **1,000 assemble/route/consume stress cycles** over a repeating
-MATCH/METHOD_NOT_ALLOWED/NOT_FOUND rotation with exact byte accounting. The
+MATCH/METHOD_NOT_ALLOWED/NOT_FOUND rotation with exact byte accounting,
+reversed-table comparisons, and rejected double consumes on every cycle. The
 full **38/38 native CTest** matrix passes in GCC 16.2.1 and Clang 22.1.8
 Debug, Release, and Debug ASan+UBSan configurations with no sanitizer findings;
 the network/heap boundary gate covers `http_route.c`; and `nm` confirms

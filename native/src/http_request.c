@@ -113,8 +113,8 @@ struct omni_http_request_result omni_http_request_assemble(
   result.source_read_ptr = data;            /* readable start at assembly time */
   result.source_readable_length = readable; /* readable length at assembly time */
   /* Readable-view epoch at assembly time. The buffer is live here (capacity
-   * is nonzero), so this is always nonzero; Task 039 requires it to still
-   * match before consuming. */
+   * is nonzero); Task 039 requires this epoch to still match before
+   * consuming. Unsigned wrap follows the bytebuf contract. */
   result.source_read_generation = omni_bytebuf_read_generation(buffer);
   return result;
 }

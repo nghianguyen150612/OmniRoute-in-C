@@ -218,9 +218,10 @@ the readable-view generation epoch contract).
   compact that moves unread bytes or canonicalizes a drained buffer, and
   reset — and never on append/commit or zero-length operations, so a
   borrowed readable view stays valid while more data arrives after it.
-  NULL/non-live buffers report 0; a live buffer is always nonzero (starts
-  at 1). Unsigned wrap at `UINT64_MAX` follows C semantics (documented
-  limitation). This is what lets Task 039 reject a stale result whose
+  NULL/non-live buffers report 0; a live buffer starts at 1. Unsigned wrap at
+  `UINT64_MAX` produces 0, then continues from 1; an epoch repeats after
+  2^64 invalidations, so views must not survive a full counter cycle.
+  This is what lets Task 039 reject a stale result whose
   readable start has returned to the same backing address.
 - **Safety**: subtraction-first bounds throughout (near-`SIZE_MAX` inputs
   fail on bounds alone); NULL/inert/destroyed inputs fail safe or no-op.
@@ -2398,23 +2399,30 @@ production wiring.
 - **Request requirement**: only a logically COMPLETE Task 038 result is
   routable — complete request line, nonempty method and target spans, nonzero
   `consumed_bytes`. INCOMPLETE, parse-error, framing-error, and malformed
-  synthetic COMPLETE results are rejected with `ERR_INVALID_REQUEST`; partial
+  synthetic COMPLETE results with inconsistent child/body/source metadata
+  are rejected with `ERR_INVALID_REQUEST`; partial
   or fake requests are never routed. Headers and body bytes are never
   inspected, so routing depends only on the exact method and target bytes.
-- **Complexity**: O(R × compared method/target bytes) with R ≤ 64, O(1)
+- **Complexity**: classification is O(R × compared method/target bytes).
+  Table-wide duplicate validation checks at most R(R−1)/2 route pairs,
+  capped at **2,016** for 64 routes. Total work is bounded by
+  O(R × MAX_ROUTES × compared bytes), with MAX_ROUTES fixed at 64, and O(1)
   additional memory — no trie, no hash table, no route-index construction, no
   heap, no I/O, no retained state, no callbacks, no production linkage.
 
 On the tested 64-bit Linux ABI, `sizeof(struct omni_http_route)` is **40 bytes**
 (two 16-byte spans plus an 8-byte token) and
 `sizeof(struct omni_http_route_result)` is **24 bytes** (status, index, token).
-Persistent state is 0 bytes; the route table is caller-owned.
+Persistent state is 0 bytes; the route table is caller-owned. The current
+`struct omni_bytebuf` and `struct omni_http_request_result` measure **56**
+and **232 bytes**, respectively.
 
-Task 040 validation: `http-route-unit` passes **3,723 checks**. It covers the
+Task 040 validation: `http-route-unit` passes **5,770 checks**. It covers the
 empty table, single and multiple exact matches, method mismatch, unknown
 targets, method and target case sensitivity, prefix/suffix/trailing-slash/
 query rejection, adjacent and separated duplicate ambiguity (including
-identical-token duplicates), route-order independence, every invalid route
+identical-token and request-unrelated duplicates), route-order independence,
+every invalid route
 entry shape, the exact `MAX_ROUTES` bound and `MAX_ROUTES+1` rejection, real
 INCOMPLETE/invalid-head/framing-error and forged COMPLETE request results,
 raw Task 038 → Task 040 integration for every classification, the full
@@ -2423,7 +2431,8 @@ independence (NUL/high bytes), unrelated and duplicate header independence,
 request/result/header/bytebuf/route-table immutability, a 14-position ×
 255-value deterministic byte-mutation sweep over the method and target spans,
 and **1,000 assemble/route/consume stress cycles** over a repeating
-MATCH/METHOD_NOT_ALLOWED/NOT_FOUND rotation with exact byte accounting. The
+MATCH/METHOD_NOT_ALLOWED/NOT_FOUND rotation with exact byte accounting,
+reversed-table comparisons, and rejected double consumes on every cycle. The
 full **38/38 native CTest** matrix passes in GCC 16.2.1 and Clang 22.1.8
 Debug, Release, and Debug ASan+UBSan configurations with zero sanitizer
 findings; the network/heap boundary gate covers `http_route.c`; and `nm`

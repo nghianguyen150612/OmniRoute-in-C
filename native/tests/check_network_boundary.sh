@@ -255,7 +255,7 @@ fi
 # The standalone HTTP parsers, framing analyzer, body view, assembler,
 # consumer, and route matcher use bounded spans. Ban
 # NUL-terminated, locale-sensitive, and unchecked numeric conversion calls.
-UNSAFE_HTTP_PARSER_CALLS='\<(strlen|strcpy|strcat|strstr|strchr|sscanf|isspace|isalnum|atoi|atol|strtol|strtoul|strtoull|strcasecmp|strncasecmp|tolower|toupper)\s*\('
+UNSAFE_HTTP_PARSER_CALLS='\<(strlen|strcmp|strncmp|strcpy|strcat|strstr|strchr|sscanf|isspace|isalnum|atoi|atol|strtol|strtoul|strtoull|strcasecmp|strncasecmp|tolower|toupper)\s*\('
 UNSAFE_HTTP_PARSER_HITS=$(grep -nE "$UNSAFE_HTTP_PARSER_CALLS" \
   "$NATIVE_DIR/src/http_header_line.c" \
   "$NATIVE_DIR/src/http_request_head.c" \

@@ -2,13 +2,11 @@
  * Task 040: bounded exact HTTP route matching over one COMPLETE Task 038
  * request view.
  *
- * The whole matcher is a single bounded scan over the caller's route table
- * with O(1) working memory: one pass records whether an exact method+target
- * match was seen (with its index and token), whether the target was seen
- * under any other method, and whether a second exact definition appears
- * anywhere in the table. Because the scan never stops early, the result is
- * independent of route order and METHOD_NOT_ALLOWED is never reported
- * before a later exact match could be found.
+ * Validate every entry, check every route pair for duplicate definitions,
+ * then classify the request. At most 64 routes and 2016 pairs are inspected,
+ * using O(1) working memory. Duplicate detection is table-wide, including
+ * routes unrelated to the current request. No target-only sighting returns
+ * before a later exact method+target match.
  *
  * Only exact byte comparisons are used: method and target spans are compared
  * by length first, then memcmp only when the lengths are already proven
@@ -29,22 +27,53 @@
 
 /* Length-first exact span comparison; memcmp only on proven-equal lengths. */
 static bool spans_equal(const unsigned char *a, size_t a_length, const unsigned char *b,
-                         size_t b_length) {
+                        size_t b_length) {
   if (a_length != b_length) {
     return false;
   }
   return memcmp(a, b, a_length) == 0;
 }
 
-struct omni_http_route_result omni_http_route_match(
-    const struct omni_http_request_result *request, const struct omni_http_route *routes,
-    size_t route_count) {
+/* Reuse Task 037's metadata contract without reparsing or reading body bytes. */
+static bool complete_request_valid(const struct omni_http_request_result *request) {
+  const struct omni_http_request_line_result *line = &request->request_head.request_line;
+  struct omni_http_request_body_result expected;
+  if (request->status != OMNI_HTTP_REQUEST_COMPLETE || request->source_read_ptr == NULL ||
+      request->consumed_bytes == 0u || request->consumed_bytes > request->source_readable_length ||
+      request->framing.status != OMNI_HTTP_REQUEST_FRAMING_OK ||
+      request->body.status != OMNI_HTTP_REQUEST_BODY_COMPLETE || line->method.length == 0u ||
+      line->method.length > OMNI_HTTP_REQUEST_LINE_MAX_METHOD_BYTES || line->target.length == 0u ||
+      line->target.length > OMNI_HTTP_REQUEST_LINE_MAX_TARGET_BYTES) {
+    return false;
+  }
+  /* Lengths are bounded, so these sums cannot overflow. A supported request
+     line has two spaces, HTTP/1.x, and CRLF (12 bytes beyond method/target). */
+  if (line->consumed_bytes != line->method.length + line->target.length + 12u ||
+      line->consumed_bytes > request->source_readable_length ||
+      line->method.data != request->source_read_ptr ||
+      line->target.data != request->source_read_ptr + line->method.length + 1u ||
+      request->request_head.consumed_bytes < line->consumed_bytes + 2u) {
+    return false;
+  }
+  expected = omni_http_request_body_view(request->source_read_ptr, request->source_readable_length,
+                                         &request->request_head, &request->framing);
+  return expected.status == OMNI_HTTP_REQUEST_BODY_COMPLETE &&
+         expected.consumed_bytes == request->consumed_bytes &&
+         expected.required_total_bytes == request->required_total_bytes &&
+         expected.consumed_bytes == request->body.consumed_bytes &&
+         expected.required_total_bytes == request->body.required_total_bytes &&
+         expected.body.data == request->body.body.data &&
+         expected.body.length == request->body.body.length;
+}
+
+struct omni_http_route_result omni_http_route_match(const struct omni_http_request_result *request,
+                                                    const struct omni_http_route *routes,
+                                                    size_t route_count) {
   struct omni_http_route_result result;
   const struct omni_http_byte_span *method;
   const struct omni_http_byte_span *target;
   bool target_seen = false;
   bool exact_match = false;
-  bool duplicate_match = false;
   size_t match_index = 0u;
   uint64_t match_token = 0u;
   size_t i = 0u;
@@ -65,65 +94,53 @@ struct omni_http_route_result omni_http_route_match(
     return result;
   }
 
-  /* Only a logically COMPLETE Task 038 result is routable. The request line
-     must be complete with nonempty method and target spans, and the consumed
-     boundary must be nonzero. Anything else — INCOMPLETE, parse/framing
-     errors, or a fabricated COMPLETE shape — is rejected before routing. */
-  if (request->status != OMNI_HTTP_REQUEST_COMPLETE ||
-      request->request_head.status != OMNI_HTTP_REQUEST_HEAD_COMPLETE ||
-      request->request_head.request_line.status != OMNI_HTTP_REQUEST_LINE_COMPLETE ||
-      request->consumed_bytes == 0u) {
+  if (!complete_request_valid(request)) {
     result.status = OMNI_HTTP_ROUTE_ERR_INVALID_REQUEST;
     return result;
   }
   method = &request->request_head.request_line.method;
   target = &request->request_head.request_line.target;
-  if (method->data == NULL || method->length == 0u || target->data == NULL ||
-      target->length == 0u) {
-    result.status = OMNI_HTTP_ROUTE_ERR_INVALID_REQUEST;
-    return result;
+
+  /* Validate all entries first: malformed entries precede ambiguity
+     independent of position. No route bytes are read in this pass. */
+  for (i = 0u; i < route_count; ++i) {
+    if (routes[i].method == NULL || routes[i].method_length == 0u || routes[i].target == NULL ||
+        routes[i].target_length == 0u) {
+      result.status = OMNI_HTTP_ROUTE_ERR_INVALID_ROUTE;
+      return result;
+    }
+  }
+  /* Fixed maximum 64: at most 64*63/2 = 2016 pairs, no extra storage. */
+  for (i = 0u; i < route_count; ++i) {
+    for (size_t j = 0u; j < i; ++j) {
+      if (spans_equal(routes[i].method, routes[i].method_length, routes[j].method,
+                      routes[j].method_length) &&
+          spans_equal(routes[i].target, routes[i].target_length, routes[j].target,
+                      routes[j].target_length)) {
+        result.status = OMNI_HTTP_ROUTE_AMBIGUOUS_ROUTE;
+        return result;
+      }
+    }
   }
 
-  /* Single bounded scan: no early returns inside the loop, so an exact
-     match later in the table always beats an earlier target-only sighting,
-     and a duplicate anywhere is still found. */
   for (i = 0u; i < route_count; ++i) {
     const struct omni_http_route *route = &routes[i];
     bool method_equal;
     bool target_equal;
 
-    if (route->method == NULL || route->method_length == 0u || route->target == NULL ||
-        route->target_length == 0u) {
-      result.status = OMNI_HTTP_ROUTE_ERR_INVALID_ROUTE;
-      return result;
-    }
-
-    method_equal =
-        spans_equal(route->method, route->method_length, method->data, method->length);
-    target_equal =
-        spans_equal(route->target, route->target_length, target->data, target->length);
+    method_equal = spans_equal(route->method, route->method_length, method->data, method->length);
+    target_equal = spans_equal(route->target, route->target_length, target->data, target->length);
 
     if (target_equal) {
       target_seen = true;
       if (method_equal) {
-        if (exact_match) {
-          /* A second exact definition: configuration ambiguity. Keep
-             scanning so a later malformed entry is still reported as
-             ERR_INVALID_ROUTE rather than masked. */
-          duplicate_match = true;
-        } else {
-          exact_match = true;
-          match_index = i;
-          match_token = route->token;
-        }
+        exact_match = true;
+        match_index = i;
+        match_token = route->token;
       }
     }
   }
 
-  if (duplicate_match) {
-    result.status = OMNI_HTTP_ROUTE_AMBIGUOUS_ROUTE;
-    return result;
-  }
   if (exact_match) {
     result.status = OMNI_HTTP_ROUTE_MATCH;
     result.route_index = match_index;

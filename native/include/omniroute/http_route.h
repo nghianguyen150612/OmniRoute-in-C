@@ -29,8 +29,10 @@
  * silent first/last choice. The table is bounded by
  * OMNI_HTTP_ROUTE_MAX_ROUTES; a larger table is rejected without scanning.
  *
- * Work is O(R * compared method/target bytes) with R <= MAX_ROUTES and O(1)
- * additional memory: no trie, no hash table, no route-index construction.
+ * Matching work is O(R * compared bytes); table-wide duplicate validation
+ * compares at most R*(R-1)/2 pairs (2016 at the fixed bound of 64). Total
+ * work is O(R * MAX_ROUTES * compared bytes), with MAX_ROUTES a fixed public
+ * constant, and additional memory is O(1). No table index is constructed.
  */
 #ifndef OMNIROUTE_HTTP_ROUTE_H
 #define OMNIROUTE_HTTP_ROUTE_H
@@ -99,13 +101,16 @@ struct omni_http_route_result {
  *
  * The request must be logically COMPLETE: status COMPLETE, a complete
  * request line with nonempty method and target spans, and a nonzero
- * consumed_bytes boundary. INCOMPLETE, parse-error, framing-error, and
+ * consumed_bytes boundary. Child framing/body results and source/boundary
+ * metadata must be consistent under Task 037's contract. This validation
+ * reads metadata only; it does not inspect headers or body bytes.
+ * INCOMPLETE, parse-error, framing-error, and
  * malformed synthetic COMPLETE results are rejected with
  * ERR_INVALID_REQUEST — partial or fake requests are never routed. The
  * borrowed request view must still be valid (assemble -> route -> consume);
  * this primitive retains no request pointer after returning.
  *
- * The whole table is always scanned (no early METHOD_NOT_ALLOWED), so the
+ * All entries are validated before duplicate checks and matching, so the
  * classification never depends on route order: an exact match anywhere in
  * the table wins over METHOD_NOT_ALLOWED, and a duplicate exact definition
  * anywhere yields AMBIGUOUS_ROUTE. On any non-MATCH status route_index and
