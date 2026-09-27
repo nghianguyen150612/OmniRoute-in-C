@@ -1221,3 +1221,64 @@ Clang 22.1.8 Debug, Release, and Debug ASan+UBSan configurations with no
 sanitizer findings; the network/heap boundary gate covers
 `http_request_consume.c`; and `nm` confirms Task 039 symbols are absent
 from the production executable, whose version and startup output are unchanged.
+
+## Bounded HTTP route matcher (Task 040)
+
+`native/src/http_route.c` classifies one COMPLETE Task 038 request view
+against a caller-owned, immutable route table.
+`omni_http_route_match(request, routes, route_count)` performs exact
+HTTP-method plus request-target matching and returns `MATCH` (with the route
+index and the caller's opaque token), `METHOD_NOT_ALLOWED`, `NOT_FOUND`,
+`AMBIGUOUS_ROUTE`, or an explicit error status. It is a pure classification
+primitive: no handler invocation, no callbacks, no response generation, no
+query parsing, no path normalization, no case folding, no wildcards or
+parameters, and no production wiring.
+
+The route table is a borrowed array of `struct omni_http_route` entries —
+pointer+length method and target spans (no NUL termination) plus an opaque
+`uint64_t` token per route. The matcher never modifies, copies, or retains the
+table, the request, or the header storage; it owns nothing and retains no
+pointer after returning. Matching is exact and case-sensitive on both spans:
+equal length plus equal bytes, with `memcmp` used only after lengths are
+proven equal. A target under another method yields `METHOD_NOT_ALLOWED`; an
+unknown target yields `NOT_FOUND`. The whole table is always scanned (no early
+`METHOD_NOT_ALLOWED`), so classification is independent of route order, and a
+duplicate exact definition anywhere yields `AMBIGUOUS_ROUTE` rather than a
+silent first/last choice.
+
+The table is bounded by `OMNI_HTTP_ROUTE_MAX_ROUTES` (64); a larger table
+is rejected with `ERR_TOO_MANY_ROUTES` before scanning. Every entry is
+validated (non-NULL, nonempty method and target spans); a malformed entry is
+`ERR_INVALID_ROUTE`, never skipped. Only a logically COMPLETE Task 038 result
+is routable — complete request line, nonempty method and target spans, nonzero
+`consumed_bytes`; INCOMPLETE, parse-error, framing-error, and forged COMPLETE
+shapes are rejected with `ERR_INVALID_REQUEST`. Headers and body bytes are
+never inspected, so routing depends only on the exact method and target bytes.
+
+Persistent matcher state is **0 bytes**, with **no heap allocation** and O(1)
+working memory. Work is O(R × compared method/target bytes) with R ≤ 64 — no
+trie, no hash table, no route-index construction. On the tested 64-bit Linux
+ABI, `sizeof(struct omni_http_route)` is **40 bytes** (two 16-byte spans plus
+an 8-byte token) and `sizeof(struct omni_http_route_result)` is **24 bytes**
+(status, index, token). The route table itself is caller-owned storage, not
+matcher memory.
+
+Task 040 validation: `http-route-unit` passes **3,723 checks**. It covers the
+empty table, single and multiple exact matches, method mismatch, unknown
+targets, method and target case sensitivity, prefix/suffix/trailing-slash/
+query rejection, adjacent and separated duplicate ambiguity (including
+identical-token duplicates), route-order independence, every invalid route
+entry shape, the exact `MAX_ROUTES` bound and `MAX_ROUTES+1` rejection, real
+INCOMPLETE/invalid-head/framing-error and forged COMPLETE request results, raw
+Task 038 → Task 040 integration for every classification, the full
+assemble → route → consume → next lifecycle with Task 039, binary-body
+independence (NUL/high octets), unrelated and duplicate header independence,
+request/result/header/bytebuf/route-table immutability, a 14-position ×
+255-value deterministic byte-mutation sweep over the method and target spans,
+and **1,000 assemble/route/consume stress cycles** over a repeating
+MATCH/METHOD_NOT_ALLOWED/NOT_FOUND rotation with exact byte accounting. The
+full **38/38 native CTest** matrix passes in GCC 16.2.1 and Clang 22.1.8
+Debug, Release, and Debug ASan+UBSan configurations with no sanitizer findings;
+the network/heap boundary gate covers `http_route.c`; and `nm` confirms
+Task 040 symbols are absent from the production executable, whose version and
+startup output are unchanged.

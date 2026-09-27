@@ -211,6 +211,12 @@ add_library(omni_http_request_consume STATIC
   src/http_request_consume.c)
 target_link_libraries(omni_http_request_consume PUBLIC omni_http_request omni_bytebuf)
 
+# Task 040 classifies one COMPLETE request against a caller-owned route table.
+# It remains standalone and test-only; no production startup wiring.
+add_library(omni_http_route STATIC
+  src/http_route.c)
+target_link_libraries(omni_http_route PUBLIC omni_http_request)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
@@ -243,6 +249,7 @@ target_include_directories(omni_http_request_framing PUBLIC include)
 target_include_directories(omni_http_request_body PUBLIC include)
 target_include_directories(omni_http_request PUBLIC include)
 target_include_directories(omni_http_request_consume PUBLIC include)
+target_include_directories(omni_http_route PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 target_link_libraries(omni_event_loop PUBLIC omni_runtime omni_reactor omni_registry omni_poller
@@ -298,6 +305,7 @@ omni_apply_native_flags(omni_http_request_framing)
 omni_apply_native_flags(omni_http_request_body)
 omni_apply_native_flags(omni_http_request)
 omni_apply_native_flags(omni_http_request_consume)
+omni_apply_native_flags(omni_http_route)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)

@@ -351,3 +351,11 @@ target_link_libraries(test_http_request_consume PRIVATE omni_http_request_consum
 omni_apply_native_flags(test_http_request_consume)
 add_test(NAME http-request-consume-unit COMMAND test_http_request_consume)
 set_tests_properties(http-request-consume-unit PROPERTIES TIMEOUT 60)
+
+# Task 040 classifies one COMPLETE request against a bounded caller-owned
+# route table with exact method+target matching. Standalone and test-only.
+add_executable(test_http_route test_http_route.c)
+target_link_libraries(test_http_route PRIVATE omni_http_route omni_http_request_consume omni_http_request omni_bytebuf)
+omni_apply_native_flags(test_http_route)
+add_test(NAME http-route-unit COMMAND test_http_route)
+set_tests_properties(http-route-unit PROPERTIES TIMEOUT 60)

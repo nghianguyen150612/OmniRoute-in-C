@@ -134,6 +134,15 @@ const ENV_VAR_ALLOWLIST = new Set([
   // C standard library constant (stdint.h) referenced in native-backend docs —
   // the readable-view generation epoch wrap point, not an env var.
   "UINT64_MAX",
+  // C enum/constant identifiers from the native route matcher (Task 040) and
+  // request consume (Task 039) referenced in native-backend docs — status enum
+  // values and the route-table bound, not OmniRoute env vars.
+  "AMBIGUOUS_ROUTE",
+  "OMNI_HTTP_ROUTE_MAX_ROUTES",
+  "ERR_TOO_MANY_ROUTES",
+  "ERR_INVALID_ROUTE",
+  "ERR_INVALID_REQUEST",
+  "MAX_ROUTES",
 ]);
 
 // Common pluralized / column-header all-caps that aren't env vars

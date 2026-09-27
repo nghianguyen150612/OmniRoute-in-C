@@ -78,6 +78,7 @@ native/
     http_request_body.c      # fixed-length HTTP body availability view (Task 037)
     http_request.c           # bounded incremental HTTP request assembler (Task 038)
     http_request_consume.c   # bounded consumption of one assembled request (Task 039)
+    http_route.c             # bounded exact HTTP route matcher (Task 040)
   tests/
     CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
     test_connection_manager.c # bounded manager unit, rollback, ownership, and stress checks
@@ -87,6 +88,7 @@ native/
     test_http_request_line.c   # bounded parser grammar, limits, and truncation checks
     test_http_request_body.c   # body boundaries, availability, binary, and pipeline checks
     test_http_request_consume.c # one-request consumption, stale rejection, pipeline, stress
+    test_http_route.c           # exact route matching, classification, bounds, lifecycle, stress
     check_network_boundary.sh  # review gate: socket setup confined to src/listener.c,
                               # readiness wait to src/poller.c, accept path plus
                               # accepted-FD lifecycle to src/accepted.c, receive
@@ -1968,7 +1970,7 @@ from the migration design happens when iOS work starts.
 Alternate event-loop backends (epoll/io_uring), production connection dispatcher,
 HTTP header semantics and bodies, response serialization, full HTTP serving, `/health`,
 `/v1/models`, TLS, SQLite, crypto,
-auth, providers, routing, streaming, compression, MCP, A2A,
+auth, providers, HTTP routing dispatch and handler invocation, streaming, compression, MCP, A2A,
 Objective-C/Swift/assembly.
 (Arenas, byte buffers, listener lifecycle, readiness observation,
 accepted-socket ownership with its bounded accept drain, receive with its
@@ -1979,7 +1981,10 @@ synchronous event loop, the bounded connection I/O state machine, the
 bounded connection/session integration, and the
 bounded connection runtime binding, the Task 032 connection lifecycle policy,
 the Task 033 standalone request-line parser, the Task 034 header-line parser,
-and the Task 035 request-head parser are
+the Task 035 request-head parser, the Task 036 framing analyzer,
+the Task 037 fixed-length body view, the Task 038 incremental request
+assembler, the Task 039 request consumption primitive, and the Task 040
+bounded route matcher are
 landed primitives now — see above.) Each
 remaining item gets its own reviewable task.
 // linguist refresh
@@ -2348,3 +2353,79 @@ Clang 22.1.8 Debug, Release, and Debug ASan+UBSan configurations with zero
 sanitizer findings; the network/heap boundary gate covers
 `http_request_consume.c`; and `nm` confirms Task 039 symbols are absent
 from the production executable, whose version and startup output are unchanged.
+
+## Bounded HTTP route matcher (Task 040)
+
+`native/include/omniroute/http_route.h` exposes
+`omni_http_route_match(request, routes, route_count)`. It classifies one
+COMPLETE Task 038 request view against a caller-owned, immutable route table
+using exact HTTP-method plus request-target matching:
+
+```text
+Task 038 COMPLETE request
+  -> omni_http_route_match()   [Task 040: exact method+target classification]
+  -> MATCH(route_token) | METHOD_NOT_ALLOWED | NOT_FOUND
+```
+
+It is a pure classification primitive: it selects a route token and nothing
+else. It remains standalone and test-only — nothing in `main.c`, connection
+dispatch, policy, session, or I/O references it, and it adds no handler
+invocation, response generation, query parsing, path normalization, or
+production wiring.
+
+- **Route table**: a caller-owned, borrowed array of `struct omni_http_route`
+  entries — pointer+length method and target spans (no NUL termination
+  required) plus an opaque `uint64_t` token per route. The table is never
+  modified, copied, or retained; the matcher owns nothing.
+- **Exact matching**: a match requires equal method length and equal method
+  bytes AND equal target length and equal target bytes. Matching is
+  case-sensitive on both spans (`GET` != `get`), with no prefix matching
+  (`/v1/models` does not match `/v1/model`, `/v1/models-extra`, or
+  `/v1/models/`), no query handling (`/v1/models?x=1` is a different
+  target), and no percent decoding, dot-segment removal, or normalization of
+  any kind.
+- **Classification**: `MATCH` returns the route index and the caller's opaque
+  token. A target that exists under another method yields
+  `METHOD_NOT_ALLOWED`; an unknown target yields `NOT_FOUND`. The whole
+  table is always scanned — never an early `METHOD_NOT_ALLOWED` — so the
+  result is independent of route order. Duplicate exact method+target
+  definitions anywhere in the table yield `AMBIGUOUS_ROUTE` (a configuration
+  error), never a silent first/last choice.
+- **Bounded table**: `OMNI_HTTP_ROUTE_MAX_ROUTES` is **64**. A larger table is
+  rejected with `ERR_TOO_MANY_ROUTES` before any scanning. Every entry is
+  validated (non-NULL, nonempty method and target spans); a malformed entry
+  is `ERR_INVALID_ROUTE`, never a silently skipped row.
+- **Request requirement**: only a logically COMPLETE Task 038 result is
+  routable — complete request line, nonempty method and target spans, nonzero
+  `consumed_bytes`. INCOMPLETE, parse-error, framing-error, and malformed
+  synthetic COMPLETE results are rejected with `ERR_INVALID_REQUEST`; partial
+  or fake requests are never routed. Headers and body bytes are never
+  inspected, so routing depends only on the exact method and target bytes.
+- **Complexity**: O(R × compared method/target bytes) with R ≤ 64, O(1)
+  additional memory — no trie, no hash table, no route-index construction, no
+  heap, no I/O, no retained state, no callbacks, no production linkage.
+
+On the tested 64-bit Linux ABI, `sizeof(struct omni_http_route)` is **40 bytes**
+(two 16-byte spans plus an 8-byte token) and
+`sizeof(struct omni_http_route_result)` is **24 bytes** (status, index, token).
+Persistent state is 0 bytes; the route table is caller-owned.
+
+Task 040 validation: `http-route-unit` passes **3,723 checks**. It covers the
+empty table, single and multiple exact matches, method mismatch, unknown
+targets, method and target case sensitivity, prefix/suffix/trailing-slash/
+query rejection, adjacent and separated duplicate ambiguity (including
+identical-token duplicates), route-order independence, every invalid route
+entry shape, the exact `MAX_ROUTES` bound and `MAX_ROUTES+1` rejection, real
+INCOMPLETE/invalid-head/framing-error and forged COMPLETE request results,
+raw Task 038 → Task 040 integration for every classification, the full
+assemble → route → consume → next lifecycle with Task 039, binary-body
+independence (NUL/high bytes), unrelated and duplicate header independence,
+request/result/header/bytebuf/route-table immutability, a 14-position ×
+255-value deterministic byte-mutation sweep over the method and target spans,
+and **1,000 assemble/route/consume stress cycles** over a repeating
+MATCH/METHOD_NOT_ALLOWED/NOT_FOUND rotation with exact byte accounting. The
+full **38/38 native CTest** matrix passes in GCC 16.2.1 and Clang 22.1.8
+Debug, Release, and Debug ASan+UBSan configurations with zero sanitizer
+findings; the network/heap boundary gate covers `http_route.c`; and `nm`
+confirms Task 040 symbols are absent from the production executable, whose
+version and startup output are unchanged.
