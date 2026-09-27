@@ -316,3 +316,10 @@ target_link_libraries(test_http_header_line PRIVATE omni_http_header_line)
 omni_apply_native_flags(test_http_header_line)
 add_test(NAME http-header-line-unit COMMAND test_http_header_line)
 set_tests_properties(http-header-line-unit PROPERTIES TIMEOUT 60)
+
+# Task 035 standalone request-head composition, with fixed caller storage.
+add_executable(test_http_request_head test_http_request_head.c)
+target_link_libraries(test_http_request_head PRIVATE omni_http_request_head)
+omni_apply_native_flags(test_http_request_head)
+add_test(NAME http-request-head-unit COMMAND test_http_request_head)
+set_tests_properties(http-request-head-unit PROPERTIES TIMEOUT 60)

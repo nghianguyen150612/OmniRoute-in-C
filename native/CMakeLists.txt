@@ -185,6 +185,10 @@ add_library(omni_http_request_line STATIC
 add_library(omni_http_header_line STATIC
   src/http_header_line.c)
 
+# Task 035 composes the standalone line parsers; test-only, no startup wiring.
+add_library(omni_http_request_head STATIC src/http_request_head.c)
+target_link_libraries(omni_http_request_head PUBLIC omni_http_request_line omni_http_header_line)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
@@ -212,6 +216,7 @@ target_include_directories(omni_connection_dispatch PUBLIC include)
 target_include_directories(omni_connection_policy PUBLIC include)
 target_include_directories(omni_http_request_line PUBLIC include)
 target_include_directories(omni_http_header_line PUBLIC include)
+target_include_directories(omni_http_request_head PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 target_link_libraries(omni_event_loop PUBLIC omni_runtime omni_reactor omni_registry omni_poller
@@ -262,6 +267,7 @@ omni_apply_native_flags(omni_connection_dispatch)
 omni_apply_native_flags(omni_connection_policy)
 omni_apply_native_flags(omni_http_request_line)
 omni_apply_native_flags(omni_http_header_line)
+omni_apply_native_flags(omni_http_request_head)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)

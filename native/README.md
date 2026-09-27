@@ -1740,8 +1740,9 @@ documentation drift/count warnings are reported.
 Task 033 adds `include/omniroute/http_request_line.h` and
 `src/http_request_line.c`, a standalone parser for exactly
 `METHOD SP REQUEST-TARGET SP HTTP-VERSION CRLF`. It is built as the separate
-`omni_http_request_line` static library and linked only into
-`http-request-line-unit`; it is not connected to `main.c`, the event loop,
+`omni_http_request_line` static library and linked into
+`http-request-line-unit` and the Task 035 composition test; it is not
+connected to `main.c`, the event loop,
 connection dispatch, or production startup. This is the first HTTP protocol
 primitive in the native backend.
 
@@ -1801,9 +1802,9 @@ field-name ":" OWS field-value OWS CRLF
 ```
 
 It is built as the separate `omni_http_header_line` static library and linked
-only into `http-header-line-unit`. It is not connected to `main.c`, the event
-loop, connection dispatch, or production startup. Full header-block parsing,
-including the terminating blank line, is deferred to Task 035.
+into `http-header-line-unit` and the Task 035 composition test. It is not
+connected to `main.c`, the event loop, connection dispatch, or production
+startup. Task 035 owns header-block composition and the terminating blank line.
 
 `omni_http_header_line_parse(data, length)` accepts a nonempty HTTP token
 field-name and preserves its original case. The colon must immediately follow
@@ -1946,7 +1947,7 @@ from the migration design happens when iOS work starts.
 ## Intentionally deferred
 
 Alternate event-loop backends (epoll/io_uring), production connection dispatcher,
-HTTP headers/bodies, response serialization, full HTTP serving, `/health`,
+HTTP header semantics and bodies, response serialization, full HTTP serving, `/health`,
 `/v1/models`, TLS, SQLite, crypto,
 auth, providers, routing, streaming, compression, MCP, A2A,
 Objective-C/Swift/assembly.
@@ -1958,7 +1959,101 @@ connection/reactor lifecycle adapter, the runtime coordinator, the bounded
 synchronous event loop, the bounded connection I/O state machine, the
 bounded connection/session integration, and the
 bounded connection runtime binding, the Task 032 connection lifecycle policy,
-and the Task 033 standalone request-line parser are
+the Task 033 standalone request-line parser, the Task 034 header-line parser,
+and the Task 035 request-head parser are
 landed primitives now — see above.) Each
 remaining item gets its own reviewable task.
 // linguist refresh
+
+## Bounded HTTP request-head parser (Task 035)
+
+`native/include/omniroute/http_request_head.h` exposes
+`omni_http_request_head_parse(data, length, headers, header_capacity)`.
+The standalone `omni_http_request_head` static library composes Task 033's
+request-line parser and Task 034's header-line parser without duplicating
+method, target, version, field-name, value, or OWS grammar. It remains linked
+only into native tests, with no production startup or connection wiring.
+Body parsing is deferred; this is not full HTTP request parsing.
+
+The result contains a status, the complete request-line result, a borrowed
+header-array view, header count, consumed bytes, and global error offset.
+Statuses are COMPLETE, INCOMPLETE, INVALID, TOO_LARGE,
+TOO_MANY_HEADERS, UNSUPPORTED_VERSION, and ERR_INVALID_ARGUMENT
+(with the OMNI_HTTP_REQUEST_HEAD_ prefix). Only COMPLETE exposes logical
+output. Every failure has zero header count and consumed bytes, NULL header
+view, and a zeroed request-line result. Caller entries touched before failure
+may contain unspecified intermediate values; they are not completed output.
+The parser does not clear the whole array.
+
+The caller supplies a fixed `struct omni_http_header` array; each entry uses
+the existing Task 034 name/value span type. The parser never allocates,
+frees, or retains this storage. Input and writable header storage must not
+overlap. NULL storage with positive capacity is invalid; NULL storage with
+zero capacity is permitted. A zero-header head can complete at capacity zero.
+NULL input with zero length is incomplete; NULL input with positive length
+is invalid. Argument validation takes precedence over parsing.
+
+OMNI_HTTP_REQUEST_HEAD_MAX_HEADERS is **64** and
+OMNI_HTTP_REQUEST_HEAD_MAX_TOTAL_BYTES is **16,384**, including the request
+line, every header CRLF, and the final blank CRLF. Existing per-line bounds
+still apply. Accepted count must fit both caller capacity and the global
+maximum. A valid complete extra field returns TOO_MANY_HEADERS at that
+field's starting offset before any write. An incomplete or malformed extra
+field keeps its child-parser status. Exact total-limit heads can complete;
+a viable prefix that reaches the total limit without termination returns
+TOO_LARGE at offset 16,384. Child line-limit failures retain their offsets.
+
+The composition layer owns the final blank CRLF and does not pass it to the
+header-line parser. It rejects any header-section line starting with SP or
+HTAB as obs-fold, including truncated continuation prefixes, at the first
+SP/HTAB offset. Header order, spelling/case, duplicates, empty values, and
+Task 034's OWS trimming are preserved. No header semantics are interpreted:
+Host, Content-Length, Transfer-Encoding, and their duplicates are just
+syntactic fields. A missing terminator or viable truncated CRLF is incomplete
+until the total bound is reached.
+
+On completion, consumed bytes stop immediately after the blank CRLF. Body
+and pipelined bytes beyond that position are ignored, including binary bytes.
+All successful method, target, name, and value spans point into the original
+input without copies or NUL termination. **All borrowed spans are valid only
+while the original input buffer remains alive and unchanged.** The caller
+also keeps the header array alive while using the returned view.
+
+Offsets advance monotonically; child error offsets are added to their
+bounded subspan's starting offset. All arithmetic stays within the 16 KiB
+cap. Incomplete offsets identify where input is needed, argument errors and
+successful results use zero, and obs-fold/capacity offsets identify the
+rejected line. Work is linear in inspected head bytes, with no recursion,
+heap, I/O, syscalls, hidden growth, or mutable global parser state.
+
+Measured on the current 64-bit Linux ABI by the focused test:
+`sizeof(struct omni_http_header_line_span)` = **16 bytes**,
+`sizeof(struct omni_http_byte_span)` = **16 bytes**,
+`sizeof(struct omni_http_header)` = **32 bytes**, and
+`sizeof(struct omni_http_request_head_result)` = **104 bytes**.
+Persistent parser state is **0 bytes**. Caller header storage costs
+`header_capacity * sizeof(struct omni_http_header)` bytes (2,048 bytes at
+64 entries on this ABI), separate from caller input and transient results.
+Sizes on other ABIs must be measured rather than assumed.
+
+Task 035 validation on the current Linux host: the focused
+`http-request-head-unit` test passes **31,377 checks, zero failures**, including
+**129 exact-allocation prefix cases** across zero-, one-, and multi-header
+heads and **7,168 octet mutations** (all 256 values at each of 28 positions).
+Capacity canaries before/after a two-entry array survive a three-header input;
+the entry after the global 64-header bound is also unchanged. Tests cover
+16,383/16,384/16,385-byte heads with individually valid lines, both SP/HTAB
+obs-fold and truncated continuations, child failures/global offsets, binary
+body/pipeline stopping, duplicates, OWS, empty values, and input immutability.
+
+The focused test and full **33/33 native CTest** suite pass in GCC Debug,
+GCC Release, GCC Debug ASan+UBSan, Clang Debug, Clang Release, and Clang Debug
+ASan+UBSan. Full sanitizer runs use
+`ASAN_OPTIONS=detect_leaks=1:halt_on_error=1` and
+`UBSAN_OPTIONS=halt_on_error=1`. The canonical `npm run test:native`, direct
+network/heap boundary gate, documentation validation, and whitespace check
+pass. The GCC Release production executable's version and startup output
+match the pre-change Task 034 build byte-for-byte. Symbol inspection finds
+no request-line, header-line, or request-head parser in that executable;
+the new parse symbol exists in its separate static library. These are local
+Linux results, not physical-iPad acceptance.
