@@ -143,6 +143,13 @@ const ENV_VAR_ALLOWLIST = new Set([
   "ERR_INVALID_ROUTE",
   "ERR_INVALID_REQUEST",
   "MAX_ROUTES",
+  // C constants/status identifiers from the Task 041 native response-head
+  // builder referenced in native-backend docs, not environment variables.
+  "OMNI_HTTP_RESPONSE_HEAD_MAX_HEADERS",
+  "OMNI_HTTP_RESPONSE_HEAD_MAX_BYTES",
+  "ERR_OVERFLOW",
+  "ERR_TOO_LARGE",
+  "ERR_OUTPUT_TOO_SMALL",
 ]);
 
 // Common pluralized / column-header all-caps that aren't env vars

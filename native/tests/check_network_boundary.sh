@@ -48,7 +48,8 @@
 # production startup wiring. The Task 040 route matcher in src/http_route.c only
 # compares exact method+target span bytes against a caller-owned route table:
 # no I/O, no allocation, no parsing, no handlers, no responses, and no
-# production startup wiring.
+# production startup wiring. The Task 041 response-head builder in
+# src/http_response_head.c only validates and serializes caller-owned metadata.
 # Every other production module (arena, bytebuf, meminfo, main, all other
 # headers and sources) must stay socket-free. The deferred layers — output
 # queues, generic payload read/write, DNS/client, threads, TLS, HTTP headers
@@ -225,7 +226,7 @@ fi
 # interaction, session coordination, runtime binding, and bounded manager
 # membership/admission coordination perform no heap allocation. Allocator tokens are banned
 # outright (negative control for the
-# Task 016/017/018/019/020/022/025/026/027/028/029/030/031/032/033/034/035/036/037/038/039/040 contracts).
+# Task 016/017/018/019/020/022/025/026/027/028/029/030/031/032/033/034/035/036/037/038/039/040/041 contracts).
 NOHEAP_IN_ACCEPT='\<(malloc|calloc|realloc|free|mmap)\s*\('
 
 HEAP_HITS=$(grep -nE "$NOHEAP_IN_ACCEPT" "$NATIVE_DIR/src/accepted.c" \
@@ -245,7 +246,8 @@ HEAP_HITS=$(grep -nE "$NOHEAP_IN_ACCEPT" "$NATIVE_DIR/src/accepted.c" \
   "$NATIVE_DIR/src/http_request_body.c" \
   "$NATIVE_DIR/src/http_request.c" \
   "$NATIVE_DIR/src/http_request_consume.c" \
-  "$NATIVE_DIR/src/http_route.c") || true
+  "$NATIVE_DIR/src/http_route.c" \
+  "$NATIVE_DIR/src/http_response_head.c") || true
 if [ -n "$HEAP_HITS" ]; then
   echo "FAIL: heap-allocation call in bounded native layer (see match above)" >&2
   echo "$HEAP_HITS" >&2
@@ -253,9 +255,9 @@ if [ -n "$HEAP_HITS" ]; then
 fi
 
 # The standalone HTTP parsers, framing analyzer, body view, assembler,
-# consumer, and route matcher use bounded spans. Ban
+# consumer, route matcher, and response-head builder use bounded spans. Ban
 # NUL-terminated, locale-sensitive, and unchecked numeric conversion calls.
-UNSAFE_HTTP_PARSER_CALLS='\<(strlen|strcmp|strncmp|strcpy|strcat|strstr|strchr|sscanf|isspace|isalnum|atoi|atol|strtol|strtoul|strtoull|strcasecmp|strncasecmp|tolower|toupper)\s*\('
+UNSAFE_HTTP_PARSER_CALLS='\<(strlen|strnlen|strcmp|strncmp|strcpy|strcat|strstr|strchr|sprintf|snprintf|vsnprintf|asprintf|sscanf|isspace|isalnum|atoi|atol|strtol|strtoul|strtoull|strcasecmp|strncasecmp|tolower|toupper)\s*\('
 UNSAFE_HTTP_PARSER_HITS=$(grep -nE "$UNSAFE_HTTP_PARSER_CALLS" \
   "$NATIVE_DIR/src/http_header_line.c" \
   "$NATIVE_DIR/src/http_request_head.c" \
@@ -263,7 +265,8 @@ UNSAFE_HTTP_PARSER_HITS=$(grep -nE "$UNSAFE_HTTP_PARSER_CALLS" \
   "$NATIVE_DIR/src/http_request_body.c" \
   "$NATIVE_DIR/src/http_request.c" \
   "$NATIVE_DIR/src/http_request_consume.c" \
-  "$NATIVE_DIR/src/http_route.c") || true
+  "$NATIVE_DIR/src/http_route.c" \
+  "$NATIVE_DIR/src/http_response_head.c") || true
 if [ -n "$UNSAFE_HTTP_PARSER_HITS" ]; then
   echo "FAIL: NUL-terminated or locale-sensitive parsing call in standalone HTTP parser/body-view source" >&2
   echo "$UNSAFE_HTTP_PARSER_HITS" >&2
@@ -274,4 +277,4 @@ if [ "$FAIL" -ne 0 ]; then
   exit 1
 fi
 
-echo "OK: networking confined to listener/poller/accepted/recv/send/connection/registry/connection_reactor/connection_io/connection_session/connection_runtime/connection_manager/connection_admission/listener_admission/connection_dispatch/connection_policy production modules; runtime coordinates lifecycle; event_loop coordinates reactor execution; connection_io owns bounded buffer I/O through recv/send; connection_session coordinates connection+io lifecycle; connection_runtime coordinates event_loop+reactor+session; connection_manager manages bounded runtime membership; connection_admission coordinates bounded accept and attach; listener_admission registers listener READ readiness and invokes the bounded admission drain; connection_dispatch resolves manager tokens and delegates one bounded session read then write without reactor mutation; connection_policy synchronizes READ/WRITE interests and releases through admission; http_request_line parses one bounded request line; http_header_line parses one bounded field line with zero-copy spans; http_request_head composes a bounded head; http_request_framing analyzes framing metadata; http_request_body views complete fixed-length bodies as borrowed spans; http_request assembles one bounded request from the bytebuf readable region; http_request_consume consumes exactly one assembled request through the existing bytebuf API; http_route matches exact method+target spans against a caller-owned table; the protocol parsers, request consumption, and route matching avoid I/O and heap allocation; send uses MSG_NOSIGNAL; no alternate-loop/scatter/generic-IO/thread/TLS calls; no heap calls in accepted.c, recv.c, send.c, connection.c, registry.c, connection_reactor.c, runtime.c, event_loop.c, connection_io.c, connection_session.c, connection_runtime.c, connection_manager.c, connection_admission.c, listener_admission.c, connection_dispatch.c, connection_policy.c, http_request_line.c, http_header_line.c, http_request_head.c, http_request_framing.c, http_request_body.c, http_request.c, http_request_consume.c, or http_route.c"
+echo "OK: networking confined to listener/poller/accepted/recv/send/connection/registry/connection_reactor/connection_io/connection_session/connection_runtime/connection_manager/connection_admission/listener_admission/connection_dispatch/connection_policy production modules; runtime coordinates lifecycle; event_loop coordinates reactor execution; connection_io owns bounded buffer I/O through recv/send; connection_session coordinates connection+io lifecycle; connection_runtime coordinates event_loop+reactor+session; connection_manager manages bounded runtime membership; connection_admission coordinates bounded accept and attach; listener_admission registers listener READ readiness and invokes the bounded admission drain; connection_dispatch resolves manager tokens and delegates one bounded session read then write without reactor mutation; connection_policy synchronizes READ/WRITE interests and releases through admission; http_request_line parses one bounded request line; http_header_line parses one bounded field line with zero-copy spans; http_request_head composes a bounded head; http_request_framing analyzes framing metadata; http_request_body views complete fixed-length bodies as borrowed spans; http_request assembles one bounded request from the bytebuf readable region; http_request_consume consumes exactly one assembled request through the existing bytebuf API; http_route matches exact method+target spans against a caller-owned table; http_response_head validates and serializes a bounded HTTP/1.1 response head; the protocol parsers, request consumption, route matching, and response-head builder avoid I/O and heap allocation; send uses MSG_NOSIGNAL; no alternate-loop/scatter/generic-IO/thread/TLS calls; no heap calls in accepted.c, recv.c, send.c, connection.c, registry.c, connection_reactor.c, runtime.c, event_loop.c, connection_io.c, connection_session.c, connection_runtime.c, connection_manager.c, connection_admission.c, listener_admission.c, connection_dispatch.c, connection_policy.c, http_request_line.c, http_header_line.c, http_request_head.c, http_request_framing.c, http_request_body.c, http_request.c, http_request_consume.c, http_route.c, or http_response_head.c"

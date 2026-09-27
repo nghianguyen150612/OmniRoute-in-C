@@ -79,6 +79,7 @@ native/
     http_request.c           # bounded incremental HTTP request assembler (Task 038)
     http_request_consume.c   # bounded consumption of one assembled request (Task 039)
     http_route.c             # bounded exact HTTP route matcher (Task 040)
+    http_response_head.c     # bounded HTTP/1.1 response-head builder (Task 041)
   tests/
     CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
     test_connection_manager.c # bounded manager unit, rollback, ownership, and stress checks
@@ -89,6 +90,7 @@ native/
     test_http_request_body.c   # body boundaries, availability, binary, and pipeline checks
     test_http_request_consume.c # one-request consumption, stale rejection, pipeline, stress
     test_http_route.c           # exact route matching, classification, bounds, lifecycle, stress
+    test_http_response_head.c   # response-head bytes, bounds, injection, immutability, stress
     check_network_boundary.sh  # review gate: socket setup confined to src/listener.c,
                               # readiness wait to src/poller.c, accept path plus
                               # accepted-FD lifecycle to src/accepted.c, receive
@@ -104,8 +106,11 @@ native/
                               # src/connection_dispatch.c; alternate
                               # loop backends, queues, IO/scatter/TLS are
                               # banned everywhere in production sources, with
-                              # heap allocation banned in the bounded native
-                              # networking/composition layers
+                              # heap allocation and NUL-terminated/locale/
+                              # formatting parsing banned in the bounded
+                              # networking/composition layers and in every
+                              # standalone bounded HTTP module through
+                              # src/http_response_head.c
 ```
 
 `compat/` holds the TypeScript harness stages (Tasks 006–010); the C
@@ -1984,8 +1989,8 @@ bounded connection runtime binding, the Task 032 connection lifecycle policy,
 the Task 033 standalone request-line parser, the Task 034 header-line parser,
 the Task 035 request-head parser, the Task 036 framing analyzer,
 the Task 037 fixed-length body view, the Task 038 incremental request
-assembler, the Task 039 request consumption primitive, and the Task 040
-bounded route matcher are
+assembler, the Task 039 request consumption primitive, the Task 040
+bounded route matcher, and the Task 041 bounded response-head builder are
 landed primitives now — see above.) Each
 remaining item gets its own reviewable task.
 // linguist refresh
@@ -2438,3 +2443,53 @@ Debug, Release, and Debug ASan+UBSan configurations with zero sanitizer
 findings; the network/heap boundary gate covers `http_route.c`; and `nm`
 confirms Task 040 symbols are absent from the production executable, whose
 version and startup output are unchanged.
+
+## Bounded HTTP/1.1 response-head builder (Task 041)
+
+`native/include/omniroute/http_response_head.h` exposes
+`omni_http_response_head_build(status_code, reason, reason_length, headers,
+header_count, output, output_capacity)`. It serializes only structured
+response metadata into caller-owned bytes; it does not generate a body, send
+bytes, invoke handlers, or wire response support into production startup.
+
+- **Borrowed metadata**: `struct omni_http_response_header` contains explicit
+  pointer+length name and value spans. No NUL termination, copy, retention, or
+  heap allocation is used. Output must not overlap borrowed metadata.
+- **Bounds**: `OMNI_HTTP_RESPONSE_HEAD_MAX_HEADERS` is **64** and
+  `OMNI_HTTP_RESPONSE_HEAD_MAX_BYTES` is **16,384**. Header count is rejected
+  before scanning when it exceeds the fixed bound.
+- **Validation**: status codes must be 100..999. Reason and value bytes accept
+  HTAB and visible ASCII (`0x20..0x7e`); names use the Task 034 HTTP token byte
+  set. Empty reasons and values are valid, while CR, LF, NUL, other controls,
+  high bytes, empty names, malformed spans, and CRLF injection are rejected.
+- **Wire format**: the exact output is `HTTP/1.1 DDD reason\r\n`, each
+  `name: value\r\n`, and one final `\r\n`. Empty reasons still include the
+  status-line space, and empty values still use the canonical `: ` separator.
+  Header order, spelling/case, and duplicates are preserved; no automatic
+  headers or Content-Length policy is added.
+- **Result and failure contract**: the result reports `status`,
+  `written_bytes`, and exact `required_bytes`. A valid `NULL, 0` output query
+  returns `ERR_OUTPUT_TOO_SMALL` with the measured size. Every failure writes
+  nothing, reports zero written bytes, and distinguishes invalid metadata,
+  checked-arithmetic overflow, an over-limit head, and insufficient output.
+  The implementation measures and validates before serialization, so capacity
+  failures and malformed metadata preserve the entire output buffer.
+- **Memory model**: persistent state is 0 bytes; working memory is O(1), and
+  validation plus serialization are O(N) for bounded head size N. On the
+  tested 64-bit Linux ABI, `sizeof(struct omni_http_response_header)` is
+  **32 bytes** and `sizeof(struct omni_http_response_head_result)` is
+  **24 bytes**. Task 042 remains deferred.
+
+The focused `http-response-head-unit` suite passes **11,425 checks**. It covers
+exact status fixtures, zero headers, empty reason/value spans, order/case/
+duplicate preservation, the exact-capacity, one-byte-short, and tail-canary
+contract for six representative responses, the exact `MAX_HEADERS` bound and
+`MAX_HEADERS+1` rejection, all 256 byte classifications for names/reasons/
+values, CRLF and NUL rejection, SIZE_MAX and near-SIZE_MAX arithmetic guards,
+over-limit lengths proven to be rejected before any byte is scanned, the exact
+16,384-byte and one-byte-over head limits, input/output immutability, and
+**10,000** deterministic builds. The full **39/39 native CTest** matrix passes
+in GCC 16.2.1 and Clang 22.1.8 Debug, Release, and Debug ASan+UBSan
+configurations with zero sanitizer findings; the network/heap boundary gate
+covers `http_response_head.c`; and `nm` confirms Task 041 symbols are absent
+from the production executable, whose version and startup output are unchanged.

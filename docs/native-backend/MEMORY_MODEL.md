@@ -1291,3 +1291,56 @@ Debug, Release, and Debug ASan+UBSan configurations with no sanitizer findings;
 the network/heap boundary gate covers `http_route.c`; and `nm` confirms
 Task 040 symbols are absent from the production executable, whose version and
 startup output are unchanged.
+
+## Bounded HTTP/1.1 response-head builder (Task 041)
+
+`native/src/http_response_head.c` implements
+`omni_http_response_head_build()`, a standalone serializer for structured
+HTTP/1.1 response metadata. It is test-only and is not referenced by
+`main.c`, connection dispatch, policy, session, or I/O. It generates no body,
+does not add policy headers, and performs no send/network operation; Task 042
+is deferred.
+
+The caller supplies a borrowed array of
+`struct omni_http_response_header` entries. Each name and value is an explicit
+pointer+length span with no NUL requirement. The builder preserves entry order,
+name/value casing, and duplicates exactly. It rejects unsupported output/input
+overlap as caller misuse rather than attempting unsafe generic pointer-range
+analysis. No metadata is copied or retained, and no heap allocation occurs.
+
+The public bounds are `OMNI_HTTP_RESPONSE_HEAD_MAX_HEADERS` (**64**) and
+`OMNI_HTTP_RESPONSE_HEAD_MAX_BYTES` (**16,384**). The result structure reports
+`status`, `written_bytes`, and exact `required_bytes`. Status codes are limited
+to 100..999 and are emitted by direct three-digit arithmetic. Reason and value
+bytes use a conservative ASCII policy: HTAB and bytes `0x20..0x7e` are
+accepted; CR, LF, NUL, all other controls, and high bytes are rejected. Names
+use the Task 034 token-byte semantics. Empty reasons and values are valid,
+with output `HTTP/1.1 DDD \r\n` for an empty reason and `Name: \r\n` for an
+empty value.
+
+The exact size is checked with `size_t` subtraction-first arithmetic before
+any borrowed bytes are scanned. Overflow returns `ERR_OVERFLOW`; a measured
+head above 16,384 returns `ERR_TOO_LARGE`; insufficient caller capacity
+returns `ERR_OUTPUT_TOO_SMALL` and the exact required size. `NULL, 0` output is
+a measure-only query for valid metadata, while NULL with positive capacity is
+an invalid argument. Validation and measurement complete before any write, so
+all failure paths preserve the entire caller output buffer. The wire format is
+`HTTP/1.1 DDD reason\r\n`, ordered `Name: value\r\n` lines, and one final
+blank `\r\n`; no trailing NUL is written.
+
+On the tested 64-bit Linux ABI, `sizeof(struct omni_http_response_header)` is
+**32 bytes** and `sizeof(struct omni_http_response_head_result)` is **24
+bytes**. Persistent state is 0 bytes, working memory is O(1), and both
+validation/measurement and serialization are O(N) over bounded response-head
+bytes. The focused suite is `http-response-head-unit`; it passes **11,425
+checks** and includes the exact maximum and one-byte-over size boundaries, the
+exact-capacity and one-byte-short contract for six representative responses,
+every 0x00..0xff name/reason/value classification, injection regressions,
+SIZE_MAX and near-SIZE_MAX arithmetic guards, over-limit lengths proven to be
+bounded before any byte is scanned, all-or-nothing capacity checks, input
+immutability, and 10,000 stress builds. The full **39/39 native CTest** matrix
+passes in GCC 16.2.1 and Clang 22.1.8 Debug, Release, and Debug ASan+UBSan
+configurations with zero sanitizer findings; the network/heap boundary gate
+covers `http_response_head.c`; and `nm` confirms Task 041 symbols are absent
+from the production executable, whose version and startup output are unchanged.
+Production response support remains unimplemented.

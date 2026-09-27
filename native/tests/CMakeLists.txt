@@ -359,3 +359,11 @@ target_link_libraries(test_http_route PRIVATE omni_http_route omni_http_request_
 omni_apply_native_flags(test_http_route)
 add_test(NAME http-route-unit COMMAND test_http_route)
 set_tests_properties(http-route-unit PROPERTIES TIMEOUT 60)
+
+# Task 041 serializes bounded HTTP/1.1 response heads into fixed caller
+# storage. It remains test-only and does not generate bodies or send bytes.
+add_executable(test_http_response_head test_http_response_head.c)
+target_link_libraries(test_http_response_head PRIVATE omni_http_response_head)
+omni_apply_native_flags(test_http_response_head)
+add_test(NAME http-response-head-unit COMMAND test_http_response_head)
+set_tests_properties(http-response-head-unit PROPERTIES TIMEOUT 60)

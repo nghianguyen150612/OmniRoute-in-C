@@ -217,6 +217,11 @@ add_library(omni_http_route STATIC
   src/http_route.c)
 target_link_libraries(omni_http_route PUBLIC omni_http_request)
 
+# Task 041 builds bounded HTTP/1.1 response heads from caller-owned metadata.
+# It remains standalone and test-only; no response body or production wiring.
+add_library(omni_http_response_head STATIC
+  src/http_response_head.c)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
@@ -250,6 +255,7 @@ target_include_directories(omni_http_request_body PUBLIC include)
 target_include_directories(omni_http_request PUBLIC include)
 target_include_directories(omni_http_request_consume PUBLIC include)
 target_include_directories(omni_http_route PUBLIC include)
+target_include_directories(omni_http_response_head PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 target_link_libraries(omni_event_loop PUBLIC omni_runtime omni_reactor omni_registry omni_poller
@@ -306,6 +312,7 @@ omni_apply_native_flags(omni_http_request_body)
 omni_apply_native_flags(omni_http_request)
 omni_apply_native_flags(omni_http_request_consume)
 omni_apply_native_flags(omni_http_route)
+omni_apply_native_flags(omni_http_response_head)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)
