@@ -344,3 +344,10 @@ target_link_libraries(test_http_request PRIVATE omni_http_request omni_bytebuf)
 omni_apply_native_flags(test_http_request)
 add_test(NAME http-request-unit COMMAND test_http_request)
 set_tests_properties(http-request-unit PROPERTIES TIMEOUT 60)
+
+# Task 039 consumes exactly one assembled request from a bounded bytebuf.
+add_executable(test_http_request_consume test_http_request_consume.c)
+target_link_libraries(test_http_request_consume PRIVATE omni_http_request_consume omni_http_request omni_bytebuf)
+omni_apply_native_flags(test_http_request_consume)
+add_test(NAME http-request-consume-unit COMMAND test_http_request_consume)
+set_tests_properties(http-request-consume-unit PROPERTIES TIMEOUT 60)

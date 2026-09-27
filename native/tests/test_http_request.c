@@ -533,6 +533,100 @@ static void test_header_mutations(void) {
   }
 }
 
+/*
+ * Task 039 adds two metadata fields (source_read_ptr / source_readable_length)
+ * to the COMPLETE result so a later consumption step can prove the borrowed
+ * view still describes the CURRENT readable region. These checks pin that
+ * contract here, in the assembler that produces it: snapshot identity at a
+ * nonzero read offset, COMPLETE-only population, no usable snapshot on
+ * INCOMPLETE or any terminal error, and stability of the readable start
+ * across a safe tail append.
+ */
+static void test_source_snapshot(void) {
+  static const unsigned char first[] = "GET /1 HTTP/1.1\r\n\r\n";
+  static const unsigned char second[] = "POST /2 HTTP/1.1\r\nContent-Length: 3\r\n\r\nABC";
+  static const unsigned char partial[] = "GET /1 HTTP/1.1\r\nHost: a\r\n";
+  static const unsigned char invalid[] = "GET /1 HTTP/1.1\r\nBad Header\r\n\r\n";
+  static const unsigned char unsupported[] = "GET /1 HTTP/2.0\r\n\r\n";
+  static const unsigned char ambiguous[] = "POST /1 HTTP/1.1\r\n"
+                                          "Content-Length: 2\r\n"
+                                          "Transfer-Encoding: chunked\r\n\r\nAB";
+  static const unsigned char prefix[] = "OLDOLD";
+  unsigned char pipeline[sizeof(first) + sizeof(second)];
+  const unsigned char *readable;
+  size_t readable_length = 0u;
+  struct fixture fixture;
+  struct fixture_snapshot snapshot;
+  struct omni_http_request_result result;
+
+  /* Snapshot identity, including from a nonzero read offset. */
+  (void)memcpy(pipeline, first, sizeof(first) - 1u);
+  (void)memcpy(pipeline + sizeof(first) - 1u, second, sizeof(second) - 1u);
+  check(load_fixture(&fixture, prefix, sizeof(prefix) - 1u, pipeline,
+                     sizeof(first) + sizeof(second) - 1u),
+        "snapshot offset fixture loads");
+  snapshot = snapshot_fixture(&fixture);
+  readable = omni_bytebuf_read_ptr(&fixture.buffer, &readable_length);
+  result = assemble(&fixture, HEADER_CAPACITY);
+  check(result.status == OMNI_HTTP_REQUEST_COMPLETE, "snapshot fixture completes");
+  check(result.source_read_ptr == readable, "COMPLETE snapshot is the current readable start");
+  check(result.source_read_ptr == fixture.storage + sizeof(prefix) - 1u,
+        "COMPLETE snapshot is relative to the read offset, not backing offset zero");
+  check(result.source_readable_length == readable_length,
+        "COMPLETE snapshot length is the current readable length");
+  check(result.source_readable_length == sizeof(first) + sizeof(second) - 1u,
+        "COMPLETE snapshot length covers both pipelined requests");
+  check_unchanged(&fixture, &snapshot, "snapshot fields do not mutate the bytebuf");
+  omni_bytebuf_destroy(&fixture.buffer);
+
+  /* A safe tail append does not move the readable start. */
+  check(load_raw(&fixture, first, sizeof(first) - 1u), "snapshot append fixture loads");
+  readable = omni_bytebuf_read_ptr(&fixture.buffer, &readable_length);
+  result = assemble(&fixture, HEADER_CAPACITY);
+  check(result.status == OMNI_HTTP_REQUEST_COMPLETE, "append fixture completes");
+  check(omni_bytebuf_append(&fixture.buffer, second, sizeof(second) - 1u),
+        "append fixture tail append succeeds");
+  check(omni_bytebuf_read_ptr(&fixture.buffer, NULL) == result.source_read_ptr,
+        "tail append leaves the assembly source start in place");
+  check(omni_bytebuf_readable(&fixture.buffer) > result.source_readable_length,
+        "tail append grows the readable region past the snapshot length");
+  check(result.consumed_bytes == sizeof(first) - 1u,
+        "appending after assembly does not change the recorded boundary");
+  omni_bytebuf_destroy(&fixture.buffer);
+
+  /* INCOMPLETE and terminal results expose no usable snapshot. */
+  {
+    const unsigned char *inputs[4] = {partial, invalid, unsupported, ambiguous};
+    const enum omni_http_request_status statuses[4] = {OMNI_HTTP_REQUEST_INCOMPLETE,
+                                                      OMNI_HTTP_REQUEST_INVALID_REQUEST_HEAD,
+                                                      OMNI_HTTP_REQUEST_UNSUPPORTED_VERSION,
+                                                      OMNI_HTTP_REQUEST_INVALID_FRAMING};
+    for (size_t i = 0u; i < 4u; ++i) {
+      check(load_raw(&fixture, inputs[i], raw_length(inputs[i])), "snapshot error fixture loads");
+      result = assemble(&fixture, HEADER_CAPACITY);
+      check(result.status == statuses[i], "snapshot error fixture maps to its Task 038 status");
+      check(result.consumed_bytes == 0u, "non-COMPLETE result still consumes zero");
+      check(result.source_read_ptr == NULL && result.source_readable_length == 0u,
+            "non-COMPLETE result exposes no usable source snapshot");
+      omni_bytebuf_destroy(&fixture.buffer);
+    }
+  }
+
+  /* A zero-capacity error path also exposes no snapshot. */
+  check(load_raw(&fixture, first, sizeof(first) - 1u), "snapshot argument fixture loads");
+  result = omni_http_request_assemble(NULL, fixture.headers, HEADER_CAPACITY);
+  check(result.status == OMNI_HTTP_REQUEST_ERR_INVALID_ARGUMENT,
+        "NULL buffer still reports invalid argument");
+  check(result.source_read_ptr == NULL && result.source_readable_length == 0u,
+        "NULL buffer exposes no usable source snapshot");
+  result = omni_http_request_assemble(&fixture.buffer, NULL, 1u);
+  check(result.status == OMNI_HTTP_REQUEST_ERR_INVALID_ARGUMENT,
+        "NULL header storage still reports invalid argument");
+  check(result.source_read_ptr == NULL && result.source_readable_length == 0u,
+        "invalid header storage exposes no usable source snapshot");
+  omni_bytebuf_destroy(&fixture.buffer);
+}
+
 int main(void) {
   test_arguments_and_empty();
   test_request_line_prefixes();
@@ -544,6 +638,7 @@ int main(void) {
   test_header_capacity_and_limits();
   test_tail_capacity_and_prefix_robustness();
   test_header_mutations();
+  test_source_snapshot();
   (void)printf("http-request-unit: %zu checks, %zu failures\n", checks, failures);
   return failures == 0u ? 0 : 1;
 }

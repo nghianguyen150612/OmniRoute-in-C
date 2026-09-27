@@ -110,5 +110,7 @@ struct omni_http_request_result omni_http_request_assemble(
   result.body = body;
   result.consumed_bytes = body.consumed_bytes;
   result.required_total_bytes = body.required_total_bytes;
+  result.source_read_ptr = data;            /* readable start at assembly time */
+  result.source_readable_length = readable; /* readable length at assembly time */
   return result;
 }

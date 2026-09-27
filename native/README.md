@@ -77,6 +77,7 @@ native/
     http_request_framing.c   # bounded HTTP framing analysis (Task 036)
     http_request_body.c      # fixed-length HTTP body availability view (Task 037)
     http_request.c           # bounded incremental HTTP request assembler (Task 038)
+    http_request_consume.c   # bounded consumption of one assembled request (Task 039)
   tests/
     CMakeLists.txt           # CTest cases (CLI, meminfo, units, network-boundary gate)
     test_connection_manager.c # bounded manager unit, rollback, ownership, and stress checks
@@ -85,6 +86,7 @@ native/
     test_connection_dispatch.c # managed READ/WRITE dispatch and admission integration checks
     test_http_request_line.c   # bounded parser grammar, limits, and truncation checks
     test_http_request_body.c   # body boundaries, availability, binary, and pipeline checks
+    test_http_request_consume.c # one-request consumption, stale rejection, pipeline, stress
     check_network_boundary.sh  # review gate: socket setup confined to src/listener.c,
                               # readiness wait to src/poller.c, accept path plus
                               # accepted-FD lifecycle to src/accepted.c, receive
@@ -2200,7 +2202,8 @@ bytes. Caller header storage remains
 `header_capacity * sizeof(struct omni_http_header)` bytes. Actual bytebuf
 consumption is deliberately deferred to Task 039.
 
-Task 038 validation: `http-request-unit` passes **828 checks**. It covers empty
+Task 038 validation: `http-request-unit` passes **863 checks** (828 before the
+Task 039 snapshot contract below was added). It covers empty
 and every request-line prefix, incomplete heads, valid headers, invalid and
 unsupported heads, fixed-length zero and short-body prefixes, binary bodies
 including all 256 byte values, unsupported Transfer-Encoding, conflicting and
@@ -2208,6 +2211,115 @@ ambiguous framing, header-capacity canaries, exact/over head limits, read-offset
 prefixes, unused-tail sentinels, no-mutation snapshots, trailing and pipelined
 requests, and deterministic header mutations. The focused suite proves the
 raw bytebuf → Task 035 → Task 036 → Task 037 → Task 038 chain directly.
-The full **36/36 native CTest** matrix passes in GCC and Clang Debug, Release,
+The full **37/37 native CTest** matrix passes in GCC and Clang Debug, Release,
 and Debug ASan+UBSan configurations; Task 038 remains absent from the
 production executable.
+
+`struct omni_http_request_result` also carries an immutable assembly snapshot,
+`source_read_ptr` plus `source_readable_length`, recorded on `COMPLETE` only.
+Task 039 needs it because `consumed_bytes` alone says nothing about _which_
+bytes it counted: without the snapshot a stale result could be replayed to
+consume the next pipelined request. It is the minimum needed for that check —
+no ownership, no copied request bytes, no registry, no global state, and no
+change to any existing field or to any other Task 038 behavior. A non-COMPLETE
+result leaves both fields `NULL`/`0`, and a tail append leaves
+`source_read_ptr` in place.
+
+## Bounded HTTP request consumption (Task 039)
+
+`native/include/omniroute/http_request_consume.h` exposes
+`omni_http_request_consume(buffer, request)`. It takes the mutable receive
+bytebuf that produced a Task 038 result plus that one result, and advances the
+read offset through `omni_bytebuf_consume()` by exactly that request's
+`consumed_bytes`. It remains standalone and test-only: nothing in `main.c`,
+connection dispatch, policy, session, or I/O references it, and it adds no
+parsing, routing, response generation, or keep-alive policy.
+
+```text
+receive bytebuf
+  -> omni_http_request_assemble()   [Task 038: borrowed COMPLETE view]
+  -> caller processes the borrowed view
+  -> omni_http_request_consume()    [Task 039: consume exactly one request]
+  -> next readable region / next pipelined request
+```
+
+Consumption requires a `COMPLETE` Task 038 result _and_ consistency with the
+current readable state. `INCOMPLETE`, invalid request head, unsupported
+version, head limit, header capacity, invalid/unsupported framing, body
+overflow, invalid argument, and invalid state all return ERR_NOT_COMPLETE and
+change nothing. A NULL or non-live bytebuf, and a NULL result, return
+ERR_INVALID_ARGUMENT. Every failure sets `consumed_bytes = 0`; there is no
+best-effort or partial consumption. (Consumption statuses are `OK`,
+ERR_INVALID_ARGUMENT, ERR_NOT_COMPLETE, ERR_STALE, ERR_INCONSISTENT, and
+ERR_BYTEBUF, all with the `OMNI_HTTP_REQUEST_CONSUME_` prefix.)
+
+Stale-result safety is the load-bearing part. `consumed_bytes` is relative to
+the readable start, so replaying an old result would otherwise silently eat
+the _next_ pipelined request. The primitive therefore requires the current
+readable start to equal the assembly snapshot, the readable region to be
+non-empty, `consumed_bytes` to be nonzero and no larger than the readable
+region, and the snapshot to cover the boundary. Consuming the same result
+twice, consuming an old result after a pipelined consume, and consuming after a
+compaction or reset all move the read offset and are rejected as ERR_STALE;
+malformed COMPLETE metadata (zero length, boundary past the readable region,
+`SIZE_MAX`, truncated snapshot) is rejected as ERR_INCONSISTENT; a refusal from
+`omni_bytebuf_consume()` is surfaced as ERR_BYTEBUF with no internal retry and
+no direct offset adjustment.
+
+The precise guarantee: Task 039 verifies that the Task 038 COMPLETE view still
+refers to the current readable-region start and that the request boundary is
+still available, catching the ordinary lifecycle mistakes listed above.
+Callers must not otherwise modify or move the bytebuf contents between assembly
+and consumption; an arbitrary same-address in-place overwrite is outside the
+borrowed-view contract, and detecting it would need a generation facility this
+layer deliberately does not add.
+
+Appending to the tail between assembly and consumption is explicitly safe: the
+readable start does not move, so the same result still consumes and the newly
+arrived bytes become the next request. Compaction and reset are not performed
+here — `omni_bytebuf_compact()` is never called, so repeated pipelined
+consumption progresses purely through read offsets and the consumed bytes stay
+at their original backing addresses. The only canonicalization is the
+empty-buffer collapse that `omni_bytebuf_consume()` already documents. There is
+no automatic second assemble: only one request is consumed per call even when
+more complete requests are already buffered, and no request-processing loop is
+introduced.
+
+The request boundary is taken only from `request->consumed_bytes`; it is never
+re-derived from the request line, headers, `Content-Length`, or body span. No
+request byte is re-parsed, rescanned, or compared, so embedded NUL and high
+bytes in a binary body cannot affect the boundary. Caller header storage, the
+caller's request result, and all request bytes are left byte-identical — only
+the bytebuf's logical read state changes. After a successful consume the old
+result's borrowed spans must no longer be used as a current request view; the
+struct itself is not cleared or rewritten here.
+
+`consumed_bytes` is always relative to the current readable start, never to
+backing offset zero, so a nonzero `read` offset from an earlier consume is
+handled naturally. Unused capacity beyond the write offset is never inspected
+or exposed.
+
+The primitive has 0 bytes of persistent state, does O(1) metadata validation
+plus one bounded bytebuf consume call, and performs no heap allocation. On the
+tested 64-bit Linux ABI, `sizeof(struct omni_http_request_consume_result)` is
+**24 bytes** (one status plus two `size_t` counters), and
+`sizeof(struct omni_http_request_result)` is **224 bytes** — up 16 bytes from
+the Task 038 baseline of 208 for the added snapshot pointer and length.
+
+Task 039 validation: `http-request-consume-unit` passes **33,109 checks**. It
+covers NULL and inert arguments, an empty buffer with both a real INCOMPLETE
+and a fake COMPLETE result, basic no-body and fixed-length consumption, a binary
+body containing NUL and high bytes, trailing non-request bytes, two and three
+pipelined requests with exact read-offset progression, a fixed body followed by
+a pipelined request, every important INCOMPLETE shape, all six terminal
+parse/framing errors, double consume, an old result aimed at the next
+pipelined request, compaction and reset after assembly, a safe tail append
+between assembly and consumption, a nonzero read offset, explicit no-compaction
+backing checks, unused-tail sentinels, caller-data immutability, five forged
+metadata variants, the full assemble → inspect → consume → next-region
+lifecycle, and **1,000 repeated assemble/consume cycles** over a repeating
+pipelined pair with bounded storage. The full **37/37 native CTest** matrix
+passes in GCC 16.2.1 and Clang 22.1.8 Debug, Release, and Debug ASan+UBSan
+configurations with zero sanitizer findings; the network/heap boundary gate
+covers `http_request_consume.c`; and `nm` confirms Task 039 symbols are absent
+from the production executable, whose version and startup output are unchanged.

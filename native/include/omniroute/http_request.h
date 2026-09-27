@@ -28,6 +28,17 @@ struct omni_http_request_result {
   struct omni_http_request_body_result body;
   size_t consumed_bytes;
   size_t required_total_bytes;
+  /*
+   * Immutable source snapshot, recorded on COMPLETE only (NULL/0 on every
+   * other result). Task 039's consumption primitive needs to prove that a
+   * COMPLETE result still describes the CURRENT readable region before it
+   * advances the bytebuf read offset, and consumed_bytes alone carries no
+   * information about WHICH bytes it counted. These two fields are that
+   * minimum: no ownership, no copied request bytes, no registry, no global
+   * state, and no semantic change to any existing field.
+   */
+  const unsigned char *source_read_ptr;  /* readable start observed at assembly */
+  size_t source_readable_length;         /* readable length observed at assembly */
 };
 
 /*
@@ -46,6 +57,13 @@ struct omni_http_request_result {
  * Returned spans become invalid if the caller later appends, consumes,
  * compacts, resets, destroys, or otherwise moves or modifies the bytebuf
  * backing storage. Task 038 does not perform any of those operations.
+ *
+ * A COMPLETE result additionally records source_read_ptr and
+ * source_readable_length: the readable-region start and length observed at
+ * assembly time. They are plain metadata for later lifecycle validation
+ * (Task 039 compares the readable start before consuming) and add no
+ * ownership. Appending to the tail does not change the readable start, so a
+ * COMPLETE result stays consumable while more data arrives.
  */
 struct omni_http_request_result omni_http_request_assemble(
     const struct omni_bytebuf *buffer, struct omni_http_header *headers, size_t header_capacity);
