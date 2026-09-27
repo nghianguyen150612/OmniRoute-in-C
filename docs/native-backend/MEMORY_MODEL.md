@@ -967,3 +967,40 @@ match the pre-change Task 034 build byte-for-byte. Symbol inspection finds
 no request-line, header-line, or request-head parser in that executable;
 the new parse symbol exists in its separate static library. These are local
 Linux results, not physical-iPad acceptance.
+
+## Bounded HTTP request framing analyzer (Task 036)
+
+`native/src/http_request_framing.c` analyzes the bounded parsed-header view
+from Task 035. It retains no parser/analyzer state, allocates no memory, and
+uses O(1) additional working storage. On the tested 64-bit Linux ABI,
+`sizeof(struct omni_http_request_framing_result)` is 40 bytes. It scans no
+more than 64 headers and never reads body bytes.
+
+ASCII-only case-insensitive matching identifies Content-Length and
+Transfer-Encoding. Content-Length is checked decimal with SIZE_MAX overflow
+protection; equal duplicate and comma-coalesced member values are accepted,
+conflicts and malformed values are rejected. Transfer-Encoding alone is
+unsupported, while its presence with Content-Length is ambiguous and rejected.
+The defined precedence is invalid head, invalid Content-Length, conflicting
+Content-Length, CL/TE ambiguity, unsupported TE, then fixed length/no body.
+Explicit Content-Length zero remains FIXED_LENGTH(0). Body reading and
+Transfer-Encoding decoding are deferred to later work (Task 037).
+
+Task 036 validation on Linux: `http-request-framing-unit` passes **2,082
+checks**, with **66 raw Task 035-to-036 integration cases**, **1,792 byte
+classification cases** over header-name and Content-Length digit/list/OWS
+positions, and **29 ASCII letter-case toggles** for both framing field names.
+The focused tests cover SIZE_MAX and SIZE_MAX+1, equal and conflicting
+Content-Length fields and comma lists, malformed input, TE-only and TE+CL in
+either order, malformed CL precedence, maximum header count, incomplete and
+inconsistent head results, and unchanged raw/head/header data including binary
+body bytes.
+
+The focused suite and full **34/34 native CTest** pass in GCC Debug, GCC
+Release, GCC Debug ASan+UBSan, Clang Debug, Clang Release, and Clang Debug
+ASan+UBSan. Sanitizer runs use leak detection and halt-on-error settings.
+`npm run test:native`, the network/heap/unsafe-parser boundary, documentation
+validation, and `git diff --check` pass. The GCC Release production executable
+has the same version and startup output as the Task 035 baseline; `nm` confirms
+`omni_http_request_framing_analyze` is absent from it. The analyzer remains
+standalone and test-only.

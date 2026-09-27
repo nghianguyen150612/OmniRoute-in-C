@@ -189,6 +189,11 @@ add_library(omni_http_header_line STATIC
 add_library(omni_http_request_head STATIC src/http_request_head.c)
 target_link_libraries(omni_http_request_head PUBLIC omni_http_request_line omni_http_header_line)
 
+# Task 036 analyzes framing from the standalone request-head result. Test-only.
+add_library(omni_http_request_framing STATIC
+  src/http_request_framing.c)
+target_link_libraries(omni_http_request_framing PUBLIC omni_http_request_head)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
@@ -217,6 +222,7 @@ target_include_directories(omni_connection_policy PUBLIC include)
 target_include_directories(omni_http_request_line PUBLIC include)
 target_include_directories(omni_http_header_line PUBLIC include)
 target_include_directories(omni_http_request_head PUBLIC include)
+target_include_directories(omni_http_request_framing PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 target_link_libraries(omni_event_loop PUBLIC omni_runtime omni_reactor omni_registry omni_poller
@@ -268,6 +274,7 @@ omni_apply_native_flags(omni_connection_policy)
 omni_apply_native_flags(omni_http_request_line)
 omni_apply_native_flags(omni_http_header_line)
 omni_apply_native_flags(omni_http_request_head)
+omni_apply_native_flags(omni_http_request_framing)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)

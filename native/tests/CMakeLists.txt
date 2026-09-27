@@ -323,3 +323,10 @@ target_link_libraries(test_http_request_head PRIVATE omni_http_request_head)
 omni_apply_native_flags(test_http_request_head)
 add_test(NAME http-request-head-unit COMMAND test_http_request_head)
 set_tests_properties(http-request-head-unit PROPERTIES TIMEOUT 60)
+
+# Task 036 standalone framing semantics; it inspects parsed head metadata only.
+add_executable(test_http_request_framing test_http_request_framing.c)
+target_link_libraries(test_http_request_framing PRIVATE omni_http_request_framing)
+omni_apply_native_flags(test_http_request_framing)
+add_test(NAME http-request-framing-unit COMMAND test_http_request_framing)
+set_tests_properties(http-request-framing-unit PROPERTIES TIMEOUT 60)

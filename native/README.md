@@ -2057,3 +2057,54 @@ match the pre-change Task 034 build byte-for-byte. Symbol inspection finds
 no request-line, header-line, or request-head parser in that executable;
 the new parse symbol exists in its separate static library. These are local
 Linux results, not physical-iPad acceptance.
+
+## Bounded HTTP request framing analyzer (Task 036)
+
+Task 036 adds `omni_http_request_framing_analyze(head)`, a standalone,
+allocation-free analyzer over a logically complete Task 035 request-head
+result. It scans the fixed, at-most-64-header view once and does not reparse
+raw headers, read or inspect request-body bytes, or apply request-method body
+policy. It is not full HTTP request processing. Task 037 body handling remains
+deferred.
+
+Header names are compared by explicit ASCII case folding only. Content-Length
+values accept decimal digits and comma-coalesced decimal members with SP/HTAB
+around members. Empty members, signs, internal whitespace, non-digits, and
+values above SIZE_MAX are invalid. Decimal accumulation checks overflow before
+multiplication. Equal duplicate fields and equal comma members are accepted;
+conflicting numeric values are rejected. `Content-Length: 0` remains an
+explicit fixed length of zero.
+
+Transfer-Encoding names are also matched case-insensitively. Any such field
+returns an explicit unsupported status without interpreting or decoding its
+value. A Content-Length plus Transfer-Encoding combination is rejected as
+ambiguous. Failure precedence is malformed/overflowing Content-Length, then
+conflicting lengths, then CL/TE ambiguity, then TE unsupported. The outcome
+does not depend on header order. Unrelated fields do not affect framing.
+Without either framing field, the result is NO_BODY for any method.
+
+The result reports status, NO_BODY or FIXED_LENGTH, length, Content-Length
+field count, Transfer-Encoding presence, and the relevant header index when
+one exists. A non-COMPLETE Task 035 result or inconsistent header view is
+rejected. The analyzer has no persistent state and uses O(1) additional
+working memory. On the tested 64-bit Linux ABI,
+`sizeof(struct omni_http_request_framing_result)` is **40 bytes**.
+
+Task 036 validation on Linux: `http-request-framing-unit` passes **2,082
+checks**, with **66 raw Task 035-to-036 integration cases**, **1,792 byte
+classification cases** over header-name and Content-Length digit/list/OWS
+positions, and **29 ASCII letter-case toggles** for both framing field names.
+The focused tests cover SIZE_MAX and SIZE_MAX+1, equal and conflicting
+Content-Length fields and comma lists, malformed input, TE-only and TE+CL in
+either order, malformed CL precedence, maximum header count, incomplete and
+inconsistent head results, and unchanged raw/head/header data including binary
+body bytes.
+
+The focused suite and full **34/34 native CTest** pass in GCC Debug, GCC
+Release, GCC Debug ASan+UBSan, Clang Debug, Clang Release, and Clang Debug
+ASan+UBSan. Sanitizer runs use leak detection and halt-on-error settings.
+`npm run test:native`, the network/heap/unsafe-parser boundary, documentation
+validation, and `git diff --check` pass. The GCC Release production executable
+has the same version and startup output as the Task 035 baseline; `nm` confirms
+`omni_http_request_framing_analyze` is absent from it. The analyzer remains
+standalone and test-only.
