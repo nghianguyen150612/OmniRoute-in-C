@@ -1344,3 +1344,47 @@ configurations with zero sanitizer findings; the network/heap boundary gate
 covers `http_response_head.c`; and `nm` confirms Task 041 symbols are absent
 from the production executable, whose version and startup output are unchanged.
 Production response support remains unimplemented.
+
+## Bounded HTTP response-message view (Task 042)
+
+`native/src/http_response.c` implements the standalone
+`omni_http_response_view()` composition primitive. It accepts a successful
+Task 041 response-head result and a caller-owned body span, then returns an
+immutable logical description containing separate head/body spans and a checked
+`size_t` total. It performs no networking, sending, handler dispatch, header
+parsing, Content-Length validation, allocation, copying, or persistent state
+management; Task 043 is deferred.
+
+The public span is `struct omni_http_response_span` with a const byte pointer
+and a length. On the tested 64-bit Linux ABI,
+`sizeof(struct omni_http_response_span)` is **16 bytes** and
+`sizeof(struct omni_http_response_result)` is **48 bytes**. The result status
+is deterministic: successful composition returns `OMNI_HTTP_RESPONSE_OK`; all
+failure paths return NULL, zero-length head/body spans and `total_bytes == 0`.
+
+Before constructing spans, the view validates the non-NULL Task 041 result,
+successful Task 041 status, nonzero written length, equality of
+`required_bytes` and `written_bytes`, available head capacity, and the non-NULL
+head pointer required by a nonempty successful head. A body pointer is required
+only when its length is nonzero. It then checks
+`body_length <= SIZE_MAX - head_result->written_bytes` before addition. It does
+not dereference either data pointer or inspect any head/body byte, so the
+composition is O(1) with O(1) working memory and zero additional body storage.
+
+The view borrows both storages. The caller must keep them alive and unchanged
+while the result is used, and must pair the successful Task 041 metadata with
+the same head output storage that produced it. Task 042 validates metadata
+consistency but does not reparse or authenticate serialized head bytes. Head
+and body storage may be separate, and body bytes may include NUL, high octets,
+CR/LF, or text that resembles another HTTP response. A zero body is valid and
+does not cause a body-pointer dereference. Semantic policy such as matching a
+`Content-Length` header to the supplied body remains outside this primitive.
+
+The focused `http-response-unit` suite reports **10,058 checks** and includes
+real Task 041 → Task 042 integration, 200/204 zero-body cases, text/binary/all
+256-byte/HTTP-looking bodies, Content-Length mismatch acceptance, unused head
+capacity, failed and fabricated inconsistent Task 041 results, NULL body
+contracts, checked total overflow, maximum response-head size, maximum header
+count, pointer identity, noncontiguous storage, immutability, and 10,000
+stress compositions. The native boundary gate covers `http_response.c` and
+rejects content-reading/copying primitives there.

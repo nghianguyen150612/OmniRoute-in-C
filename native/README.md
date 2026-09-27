@@ -2493,3 +2493,50 @@ in GCC 16.2.1 and Clang 22.1.8 Debug, Release, and Debug ASan+UBSan
 configurations with zero sanitizer findings; the network/heap boundary gate
 covers `http_response_head.c`; and `nm` confirms Task 041 symbols are absent
 from the production executable, whose version and startup output are unchanged.
+
+## Bounded HTTP response-message view (Task 042)
+
+`native/include/omniroute/http_response.h` exposes
+`omni_http_response_view(head_data, head_available, head_result, body_data,
+body_length)`. It composes a successful Task 041 serialized response head with
+caller-owned body bytes into an immutable logical view. It does not send bytes,
+implement handlers, parse response headers, or wire response support into the
+production executable; Task 043 remains deferred.
+
+- **Spans**: `struct omni_http_response_span` is a borrowed pointer+length pair.
+  The result contains separate `head` and `body` spans plus `total_bytes`. Head
+  and body storage may be unrelated and non-contiguous; neither is copied.
+- **Task 041 evidence**: `head_result` must be non-NULL and have status
+  `OMNI_HTTP_RESPONSE_HEAD_OK`, nonzero `written_bytes`, equal
+  `required_bytes` and `written_bytes`, and `written_bytes <= head_available`.
+  A nonempty successful head also requires non-NULL `head_data`. The view uses
+  only the exact `written_bytes` boundary, never unused output capacity. The
+  caller must pair the result with the same storage produced by Task 041;
+  metadata validation does not authenticate or rescan head bytes.
+- **Body contract**: `body_data == NULL, body_length == 0` is valid; NULL with a
+  nonzero length is invalid. Body bytes are opaque, binary-safe, and never
+  scanned, classified, NUL-terminated, or interpreted as HTTP. A body may
+  contain arbitrary bytes or HTTP-looking text.
+- **Policy boundary**: Task 042 does not inspect or validate Content-Length,
+  Transfer-Encoding, Content-Type, Connection, or any other header semantics.
+  A Task 041 head that says `Content-Length: 100` can compose with three body
+  bytes; a later policy or handler layer owns consistency checks. No arbitrary
+  body-size cap is introduced.
+- **Arithmetic and failures**: `total_bytes` uses checked `size_t` addition.
+  Overflow returns `OMNI_HTTP_RESPONSE_ERR_OVERFLOW`. Every failure returns an
+  empty deterministic view with NULL spans and zero total bytes.
+- **Lifetime and complexity**: both storages must remain alive and unchanged
+  while the view is used; Task 042 retains no state. Persistent state and
+  additional body storage are 0 bytes, working memory is O(1), and composition
+  is O(1), independent of head and body contents. On the tested 64-bit Linux
+  ABI, `sizeof(struct omni_http_response_span)` is **16 bytes** and
+  `sizeof(struct omni_http_response_result)` is **48 bytes**.
+
+The focused `http-response-unit` suite passes **10,058 checks**. It covers real
+Task 041 → Task 042 composition for 200 and 204 zero-body responses, text and
+binary bodies, all 256 byte values, HTTP-looking body bytes, Content-Length
+mismatch non-policy behavior, unused head capacity, failed and inconsistent
+Task 041 results, NULL body contracts, checked overflow, maximum head size,
+maximum header count, separate storage, pointer identity, input immutability,
+and **10,000** compositions. The boundary gate covers `http_response.c` and
+structurally bans content-reading/copying calls from it.

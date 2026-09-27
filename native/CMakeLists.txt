@@ -222,6 +222,12 @@ target_link_libraries(omni_http_route PUBLIC omni_http_request)
 add_library(omni_http_response_head STATIC
   src/http_response_head.c)
 
+# Task 042 composes a successful Task 041 head with a borrowed body span.
+# It remains standalone and test-only; no send lifecycle or production wiring.
+add_library(omni_http_response STATIC
+  src/http_response.c)
+target_link_libraries(omni_http_response PUBLIC omni_http_response_head)
+
 add_executable(omniroute-native
   src/main.c
   src/meminfo.c)
@@ -256,6 +262,7 @@ target_include_directories(omni_http_request PUBLIC include)
 target_include_directories(omni_http_request_consume PUBLIC include)
 target_include_directories(omni_http_route PUBLIC include)
 target_include_directories(omni_http_response_head PUBLIC include)
+target_include_directories(omni_http_response PUBLIC include)
 target_include_directories(omniroute-native PRIVATE include)
 
 target_link_libraries(omni_event_loop PUBLIC omni_runtime omni_reactor omni_registry omni_poller
@@ -313,6 +320,7 @@ omni_apply_native_flags(omni_http_request)
 omni_apply_native_flags(omni_http_request_consume)
 omni_apply_native_flags(omni_http_route)
 omni_apply_native_flags(omni_http_response_head)
+omni_apply_native_flags(omni_http_response)
 omni_apply_native_flags(omniroute-native)
 
 include(CTest)

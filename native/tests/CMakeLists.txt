@@ -367,3 +367,11 @@ target_link_libraries(test_http_response_head PRIVATE omni_http_response_head)
 omni_apply_native_flags(test_http_response_head)
 add_test(NAME http-response-head-unit COMMAND test_http_response_head)
 set_tests_properties(http-response-head-unit PROPERTIES TIMEOUT 60)
+
+# Task 042 composes a successful Task 041 head with a borrowed body span.
+# It remains test-only and does not send or wire response handling.
+add_executable(test_http_response test_http_response.c)
+target_link_libraries(test_http_response PRIVATE omni_http_response omni_http_response_head)
+omni_apply_native_flags(test_http_response)
+add_test(NAME http-response-unit COMMAND test_http_response)
+set_tests_properties(http-response-unit PROPERTIES TIMEOUT 60)
