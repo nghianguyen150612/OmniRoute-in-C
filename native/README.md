@@ -182,8 +182,9 @@ this task — and no arena-efficiency claim is drawn from it.
 
 Bounded reusable byte staging for future socket receive staging and
 incremental parsing (`include/omniroute/bytebuf.h`, `src/bytebuf.c`,
-unit-tested by `tests/test_bytebuf.c` — 202 checks via CTest
-`bytebuf-unit`, including a 400-op deterministic invariant stress test).
+unit-tested by `tests/test_bytebuf.c` — 227 checks via CTest
+`bytebuf-unit`, including a 400-op deterministic invariant stress test and
+the readable-view generation epoch contract).
 
 - **Hard cap**: explicit finite capacity at init (zero capacity rejected,
   symmetric with the arena). No growth path exists — no realloc, no chunks,
@@ -209,6 +210,16 @@ unit-tested by `tests/test_bytebuf.c` — 202 checks via CTest
 - **Bytes, not strings**: no NUL appended, no text assumption; embedded
   zeros round-trip. `reset` reuses backing without clearing (no erasure
   guarantee). `high_water` tracks peak readable across reset.
+- **Readable-view generation**: a local `uint64_t` epoch
+  (`omni_bytebuf_read_generation`) names the identity of the current
+  readable view. It advances on every successful nonzero consume, every
+  compact that moves unread bytes or canonicalizes a drained buffer, and
+  reset — and never on append/commit or zero-length operations, so a
+  borrowed readable view stays valid while more data arrives after it.
+  NULL/non-live buffers report 0; a live buffer is always nonzero (starts
+  at 1). Unsigned wrap at `UINT64_MAX` follows C semantics (documented
+  limitation). This is what lets Task 039 reject a stale result whose
+  readable start has returned to the same backing address.
 - **Safety**: subtraction-first bounds throughout (near-`SIZE_MAX` inputs
   fail on bounds alone); NULL/inert/destroyed inputs fail safe or no-op.
 - **Threads**: none — single-owner, externally synchronized by contract.
@@ -2216,14 +2227,18 @@ and Debug ASan+UBSan configurations; Task 038 remains absent from the
 production executable.
 
 `struct omni_http_request_result` also carries an immutable assembly snapshot,
-`source_read_ptr` plus `source_readable_length`, recorded on `COMPLETE` only.
-Task 039 needs it because `consumed_bytes` alone says nothing about _which_
-bytes it counted: without the snapshot a stale result could be replayed to
-consume the next pipelined request. It is the minimum needed for that check —
-no ownership, no copied request bytes, no registry, no global state, and no
-change to any existing field or to any other Task 038 behavior. A non-COMPLETE
-result leaves both fields `NULL`/`0`, and a tail append leaves
-`source_read_ptr` in place.
+`source_read_ptr`, `source_readable_length`, and `source_read_generation`,
+recorded on `COMPLETE` only. Task 039 needs it because `consumed_bytes` alone
+says nothing about _which_ bytes it counted: without the snapshot a stale
+result could be replayed to consume the next pipelined request. The
+generation epoch is required because the pointer alone is not identity —
+after a consume-to-empty or a compaction, the readable start can return to
+the same backing address for a completely different region. It is the
+minimum needed for that check — no ownership, no copied request bytes, no
+registry, no global state, and no change to any existing field or to any
+other Task 038 behavior. A non-COMPLETE result leaves the fields
+`NULL`/`0`/`0`, and a tail append leaves `source_read_ptr` and the
+generation in place.
 
 ## Bounded HTTP request consumption (Task 039)
 
@@ -2267,12 +2282,17 @@ malformed COMPLETE metadata (zero length, boundary past the readable region,
 no direct offset adjustment.
 
 The precise guarantee: Task 039 verifies that the Task 038 COMPLETE view still
-refers to the current readable-region start and that the request boundary is
-still available, catching the ordinary lifecycle mistakes listed above.
-Callers must not otherwise modify or move the bytebuf contents between assembly
-and consumption; an arbitrary same-address in-place overwrite is outside the
-borrowed-view contract, and detecting it would need a generation facility this
-layer deliberately does not add.
+refers to the current readable-region start _under the same readable-view
+generation epoch_ and that the request boundary is still available. The
+generation check is what makes same-address reuse detectable: a
+consume-to-empty canonicalization, a compaction, and a reset/refill can all
+return the readable start to the exact address the old snapshot recorded, and
+only the epoch distinguishes the new region from the consumed one. This catches
+the ordinary lifecycle mistakes listed above — including the same-address
+aliases — while a safe tail append (which moves neither the readable start
+nor the epoch) stays valid. Callers must not otherwise modify or move the
+bytebuf contents between assembly and consumption; an arbitrary same-address
+in-place overwrite is outside the borrowed-view contract.
 
 Appending to the tail between assembly and consumption is explicitly safe: the
 readable start does not move, so the same result still consumes and the newly
@@ -2303,10 +2323,11 @@ The primitive has 0 bytes of persistent state, does O(1) metadata validation
 plus one bounded bytebuf consume call, and performs no heap allocation. On the
 tested 64-bit Linux ABI, `sizeof(struct omni_http_request_consume_result)` is
 **24 bytes** (one status plus two `size_t` counters), and
-`sizeof(struct omni_http_request_result)` is **224 bytes** — up 16 bytes from
-the Task 038 baseline of 208 for the added snapshot pointer and length.
+`sizeof(struct omni_http_request_result)` is **232 bytes** — up 24 bytes from
+the Task 038 baseline of 208 for the added snapshot pointer, length, and
+generation epoch.
 
-Task 039 validation: `http-request-consume-unit` passes **33,109 checks**. It
+Task 039 validation: `http-request-consume-unit` passes **33,174 checks**. It
 covers NULL and inert arguments, an empty buffer with both a real INCOMPLETE
 and a fake COMPLETE result, basic no-body and fixed-length consumption, a binary
 body containing NUL and high bytes, trailing non-request bytes, two and three
@@ -2315,11 +2336,15 @@ a pipelined request, every important INCOMPLETE shape, all six terminal
 parse/framing errors, double consume, an old result aimed at the next
 pipelined request, compaction and reset after assembly, a safe tail append
 between assembly and consumption, a nonzero read offset, explicit no-compaction
-backing checks, unused-tail sentinels, caller-data immutability, five forged
-metadata variants, the full assemble → inspect → consume → next-region
-lifecycle, and **1,000 repeated assemble/consume cycles** over a repeating
-pipelined pair with bounded storage. The full **37/37 native CTest** matrix
-passes in GCC 16.2.1 and Clang 22.1.8 Debug, Release, and Debug ASan+UBSan
-configurations with zero sanitizer findings; the network/heap boundary gate
-covers `http_request_consume.c`; and `nm` confirms Task 039 symbols are absent
+backing checks, unused-tail sentinels, caller-data immutability, eight forged
+metadata variants (including stale-generation and zero-generation snapshots),
+the six generation-epoch alias regressions (consume-to-empty refill, compact
+alias at the same address, reset/refill alias, external partial consume,
+zero-consume validity, safe tail append under the generation check), the full
+assemble → inspect → consume → next-region lifecycle, and **1,000 repeated
+assemble/consume cycles** over a repeating pipelined pair with bounded
+storage. The full **37/37 native CTest** matrix passes in GCC 16.2.1 and
+Clang 22.1.8 Debug, Release, and Debug ASan+UBSan configurations with zero
+sanitizer findings; the network/heap boundary gate covers
+`http_request_consume.c`; and `nm` confirms Task 039 symbols are absent
 from the production executable, whose version and startup output are unchanged.

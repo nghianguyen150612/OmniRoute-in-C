@@ -131,6 +131,9 @@ const ENV_VAR_ALLOWLIST = new Set([
   // Telegram Mini App integration (proposal TELEGRAM-MINIAPP.md, not yet implemented): env vars named in the feasibility analysis but no code reads them yet.
   "TELEGRAM_WEBHOOK_URL", // proposal-only: Telegram webhook public endpoint (TELEGRAM-MINIAPP.md, future feature)
   "TELEGRAM_WEBHOOK_SECRET", // proposal-only: Telegram webhook HMAC secret (TELEGRAM-MINIAPP.md, future feature)
+  // C standard library constant (stdint.h) referenced in native-backend docs —
+  // the readable-view generation epoch wrap point, not an env var.
+  "UINT64_MAX",
 ]);
 
 // Common pluralized / column-header all-caps that aren't env vars

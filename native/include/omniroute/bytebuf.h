@@ -41,6 +41,20 @@
  * retain a view across those calls; never treat one as a stable owned or
  * NUL-terminated string.
  *
+ * Readable-view generation (Task 039 corrective): a pointer alone cannot
+ * identify a logical readable region, because consume-to-empty and compact
+ * both return the readable start to the same backing address for a
+ * _different_ region. Each buffer therefore carries a monotonic
+ * `read_generation` epoch that names the identity of the current readable
+ * view. It advances exactly when an operation invalidates existing readable
+ * views: a successful nonzero consume, a compact that moves unread bytes or
+ * canonicalizes a drained buffer, and reset. Tail growth (append/commit)
+ * never advances it, so a borrowed request view stays valid while more data
+ * arrives after it. Zero-length operations are true no-ops and never
+ * advance it. The counter is a local uint64_t: unsigned wrap at UINT64_MAX
+ * follows C semantics and is documented as a limitation (a stale view
+ * surviving 2^63 intervening invalidations is not a supported scenario).
+ *
  * Byte semantics: raw bytes, no NUL appended, no text/UTF-8 assumption, no
  * strlen-based API. Embedded zero bytes are ordinary payload.
  *
@@ -64,6 +78,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 struct omni_bytebuf {
   unsigned char *backing;
@@ -71,6 +86,14 @@ struct omni_bytebuf {
   size_t read;       /* offset of first readable byte; reclaimable prefix */
   size_t write;      /* one-past-last readable byte; start of free tail */
   size_t high_water; /* lifetime maximum of readable bytes; reset preserves */
+  /*
+   * Monotonic epoch naming the identity of the current readable view.
+   * Advances on every successful nonzero consume, on every compact that
+   * moves unread bytes or canonicalizes a drained buffer, and on reset.
+   * Append/commit (tail growth) and zero-length operations never advance
+   * it. Zero only for non-live buffers; a live buffer starts at 1.
+   */
+  uint64_t read_generation;
   bool owns_backing;
   bool live; /* false before init, after destroy, or after failed init */
 };
@@ -97,6 +120,15 @@ bool omni_bytebuf_init_owned(struct omni_bytebuf *buf, size_t capacity);
  * pointer is borrowed (see lifetime notes above). NULL buffer: NULL.
  */
 const unsigned char *omni_bytebuf_read_ptr(const struct omni_bytebuf *buf, size_t *out_len);
+
+/*
+ * Readable-view generation epoch of a live buffer: a nonzero identity that
+ * changes whenever an operation invalidates existing readable views (see
+ * the generation note above). NULL or non-live buffer: 0. A live buffer
+ * always reports a nonzero generation, so 0 unambiguously means "no live
+ * readable view" to snapshot consumers such as Task 038/039.
+ */
+uint64_t omni_bytebuf_read_generation(const struct omni_bytebuf *buf);
 
 /*
  * Zero-copy writable view: pointer to the contiguous free tail plus its
@@ -134,7 +166,11 @@ bool omni_bytebuf_append(struct omni_bytebuf *buf, const void *src, size_t len);
  * Requires count <= readable bytes; zero is a successful no-op. Returns
  * false with state unchanged otherwise. Consuming exactly the readable
  * amount reaches the canonical empty state (read == write == 0). Never
- * erases bytes. Never allocates.
+ * erases bytes. Never allocates. A successful nonzero consume advances the
+ * readable-view generation: every outstanding readable view (including a
+ * consume-to-empty canonicalization that returns the start to backing
+ * offset zero) is invalidated. consume(0) and failed consumes never
+ * advance it.
  */
 bool omni_bytebuf_consume(struct omni_bytebuf *buf, size_t count);
 
@@ -145,7 +181,10 @@ bool omni_bytebuf_consume(struct omni_bytebuf *buf, size_t count);
  * read == write == 0). NULL or non-live buffers: no-op. Never allocates.
  * This is the ONLY operation with cost proportional to the unread bytes —
  * every other steady-state operation is O(1) — so callers compact
- * explicitly, never per-consume.
+ * explicitly, never per-consume. Whenever read > 0 the logical readable
+ * placement changes (bytes move, or a drained buffer canonicalizes), so
+ * the readable-view generation advances; a true no-op compact (read == 0)
+ * never advances it.
  */
 void omni_bytebuf_compact(struct omni_bytebuf *buf);
 
@@ -153,6 +192,9 @@ void omni_bytebuf_compact(struct omni_bytebuf *buf);
  * Make the buffer logically empty (read == write == 0) while retaining
  * backing storage and capacity for reuse. Contents are NOT cleared and
  * high-water is preserved. No heap activity. NULL or non-live: no-op.
+ * A reset of a live buffer advances the readable-view generation even
+ * though the backing pointer is retained: every outstanding readable view
+ * becomes stale regardless of the offsets returning to zero.
  */
 void omni_bytebuf_reset(struct omni_bytebuf *buf);
 

@@ -66,6 +66,11 @@ struct omni_http_request_consume_result {
  * result is consistent with the CURRENT readable state:
  *   - the current readable start equals the assembly snapshot
  *     (request->source_read_ptr, recorded by Task 038);
+ *   - the current readable-view generation equals the assembly snapshot
+ *     (request->source_read_generation, recorded by Task 038 from
+ *     omni_bytebuf_read_generation) — the pointer alone is not identity,
+ *     because consume-to-empty and compact can return the readable start to
+ *     the same backing address for a different region;
  *   - the readable region is non-empty;
  *   - request->consumed_bytes is nonzero and no larger than the current
  *     readable length;
@@ -82,16 +87,20 @@ struct omni_http_request_consume_result {
  *
  * Stale-result safety contract (precise, not a blanket claim): this primitive
  * verifies that the COMPLETE view still refers to the current readable-region
- * start and that its boundary is still available, which catches the ordinary
+ * start under the same readable-view generation epoch, and that its boundary
+ * is still available. The generation check is what makes same-address reuse
+ * detectable: after a consume-to-empty or a compaction, the readable start
+ * can equal the old snapshot pointer while naming a completely different
+ * region, and only the epoch distinguishes them. This catches the ordinary
  * lifecycle mistakes: consuming a result twice, consuming an old result after
- * a pipelined consume, and consuming after a compaction or reset that moved
- * the readable start. Callers must not otherwise modify or move the underlying
- * bytebuf contents between assembly and consumption; an arbitrary same-address
- * overwrite in place is outside the borrowed-view contract, and detecting it
- * would require a generation facility this layer deliberately does not add.
- * Appending to the tail between assembly and consumption is safe: the
- * readable start does not move, so the same result still consumes correctly
- * and the newly arrived bytes become the next request.
+ * a pipelined consume, consuming after a compaction or reset (including a
+ * reset/refill that restores the same readable address), and consuming after
+ * an external partial consume. Callers must not otherwise modify or move the
+ * underlying bytebuf contents between assembly and consumption; an arbitrary
+ * same-address overwrite in place is outside the borrowed-view contract.
+ * Appending to the tail between assembly and consumption is safe: neither the
+ * readable start nor the generation moves, so the same result still consumes
+ * correctly and the newly arrived bytes become the next request.
  *
  * Borrowed-view lifetime: after a successful consume the request result's
  * borrowed spans must no longer be used as a current request view. The

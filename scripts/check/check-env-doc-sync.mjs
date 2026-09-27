@@ -226,6 +226,9 @@ const IGNORE_FROM_CODE = new Set([
   // Test-only escape hatch: makes getMachineIdRaw() skip the macOS ioreg strategy so
   // machineId tests reach the fallback strategies on darwin (#13539). Not user config.
   "DISABLE_IOREG_STRATEGY",
+  // C standard library constant (stdint.h) referenced in native-backend docs —
+  // the readable-view generation epoch wrap point, not an OmniRoute env var.
+  "UINT64_MAX",
 ]);
 
 // Vars documented in ENVIRONMENT.md but intentionally absent from .env.example.

@@ -33,12 +33,19 @@ struct omni_http_request_result {
    * other result). Task 039's consumption primitive needs to prove that a
    * COMPLETE result still describes the CURRENT readable region before it
    * advances the bytebuf read offset, and consumed_bytes alone carries no
-   * information about WHICH bytes it counted. These two fields are that
+   * information about WHICH bytes it counted. These three fields are that
    * minimum: no ownership, no copied request bytes, no registry, no global
    * state, and no semantic change to any existing field.
+   *
+   * The generation epoch is required because the pointer alone is not
+   * identity: after a consume-to-empty or a compact, the readable start can
+   * return to the same backing address for a completely different region.
+   * Task 039 therefore requires BOTH the pointer and the generation to match
+   * the current readable view before consuming.
    */
   const unsigned char *source_read_ptr;  /* readable start observed at assembly */
   size_t source_readable_length;         /* readable length observed at assembly */
+  uint64_t source_read_generation;       /* readable-view epoch observed at assembly */
 };
 
 /*
@@ -58,12 +65,13 @@ struct omni_http_request_result {
  * compacts, resets, destroys, or otherwise moves or modifies the bytebuf
  * backing storage. Task 038 does not perform any of those operations.
  *
- * A COMPLETE result additionally records source_read_ptr and
- * source_readable_length: the readable-region start and length observed at
- * assembly time. They are plain metadata for later lifecycle validation
- * (Task 039 compares the readable start before consuming) and add no
- * ownership. Appending to the tail does not change the readable start, so a
- * COMPLETE result stays consumable while more data arrives.
+ * A COMPLETE result additionally records source_read_ptr,
+ * source_readable_length, and source_read_generation: the readable-region
+ * start, length, and bytebuf readable-view epoch observed at assembly time.
+ * They are plain metadata for later lifecycle validation (Task 039 compares
+ * both the readable start and the epoch before consuming) and add no
+ * ownership. Appending to the tail does not change the readable start or the
+ * epoch, so a COMPLETE result stays consumable while more data arrives.
  */
 struct omni_http_request_result omni_http_request_assemble(
     const struct omni_bytebuf *buffer, struct omni_http_header *headers, size_t header_capacity);

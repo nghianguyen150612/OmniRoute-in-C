@@ -333,11 +333,18 @@ recovery RSS: …  VmHWM: …  Threads: …  FDs: …
     and incremental parsing — linear read/write offsets, hard cap with no
     growth path, tail-only append (explicit compact, never implicit),
     zero-copy read/write views, commit/consume/compact/reset, borrowed-or-
-    single-owned backing, lifetime high-water. Task 017 adds
-    `native/src/recv.c` as the allocation-free consumer: one nonblocking
-    `recv()` writes directly into the writable tail and commits the exact
-    positive count; bounded drain, EOF, would-block, buffer-full, and fatal
-    receive outcomes remain explicit. HTTP/parser wiring is still later.
+    single-owned backing, lifetime high-water. A local `uint64_t`
+    readable-view generation epoch (`omni_bytebuf_read_generation`) advances
+    on every successful nonzero consume, every compact with `read > 0`, and
+    reset — never on append/commit or zero-length operations — so a borrowed
+    readable view stays valid across tail growth while same-address reuse
+    after a consume-to-empty, compaction, or reset/refill is detectable.
+    Unsigned wrap at `UINT64_MAX` follows C semantics (documented
+    limitation). Task 017 adds `native/src/recv.c` as the allocation-free
+    consumer: one nonblocking `recv()` writes directly into the writable
+    tail and commits the exact positive count; bounded drain, EOF,
+    would-block, buffer-full, and fatal receive outcomes remain explicit.
+    HTTP/parser wiring is still later.
   - Send primitive implemented (Task 018, `native/src/send.c`,
     `omni_send_*`): one nonblocking `send()` from an immutable caller-owned
     span with Linux per-call MSG_NOSIGNAL, no payload copy, no retained
@@ -1080,14 +1087,19 @@ bytebuf backing storage, or reuses the header array. Actual consumption is
 Task 039 below.
 
 A `COMPLETE` result additionally records an immutable assembly snapshot:
-`source_read_ptr` (the readable-region start) and `source_readable_length` (the
-readable length at assembly). Task 039 needs both because `consumed_bytes` is
-relative to the readable start and therefore says nothing about _which_ bytes it
-counted — without the snapshot, a stale result could be replayed to consume the
-next pipelined request. The snapshot is the minimum needed for that check: no
-ownership, no copied request bytes, no registry, no global state, and no change
-to any other field or behavior. Non-`COMPLETE` results leave both fields
-`NULL`/`0`, and a tail append does not move `source_read_ptr`.
+`source_read_ptr` (the readable-region start), `source_readable_length` (the
+readable length at assembly), and `source_read_generation` (the bytebuf
+readable-view epoch at assembly). Task 039 needs all three because
+`consumed_bytes` is relative to the readable start and therefore says nothing
+about _which_ bytes it counted — without the snapshot, a stale result could be
+replayed to consume the next pipelined request. The generation epoch is
+required because the pointer alone is not identity: after a consume-to-empty
+or a compaction, the readable start can return to the same backing address for
+a completely different region. The snapshot is the minimum needed for that
+check: no ownership, no copied request bytes, no registry, no global state,
+and no change to any other field or behavior. Non-`COMPLETE` results leave
+the fields `NULL`/`0`/`0`, and a tail append moves neither `source_read_ptr`
+nor the epoch.
 
 Persistent assembler state is **0 bytes**. Additional body storage is **0
 bytes**, and there is no per-request heap allocation. Work is bounded by the
@@ -1140,21 +1152,25 @@ Stale-result safety is the memory-relevant part. Because `consumed_bytes` is
 relative to the readable start, replaying an old result would otherwise consume
 the _next_ pipelined request — silent data corruption, not just a lost view. The
 primitive therefore requires the current readable start to equal the Task 038
-assembly snapshot, a non-empty readable region, a nonzero `consumed_bytes` no
-larger than the readable region, and a snapshot covering that boundary. Double
-consume, an old result aimed at the next pipelined request, and consumption
-after a compaction or reset all move the read offset and are rejected as
+assembly snapshot, the current readable-view generation to equal the snapshot's
+recorded epoch, a non-empty readable region, a nonzero `consumed_bytes` no
+larger than the readable region, and a snapshot covering that boundary. The
+generation epoch is what makes same-address reuse detectable: a consume-to-empty
+canonicalization, a compaction, and a reset/refill can all return the readable
+start to the exact address the old snapshot recorded, and only the epoch
+distinguishes the new region from the consumed one. Double consume, an old
+result aimed at the next pipelined request, consumption after a compaction or
+reset, and consumption after an external partial consume are all rejected as
 ERR_STALE; malformed `COMPLETE` metadata is rejected as ERR_INCONSISTENT; a
 refusal from `omni_bytebuf_consume()` surfaces as ERR_BYTEBUF with no internal
 retry and no direct offset manipulation.
 
 The guarantee is deliberately narrow and is documented as such: the primitive
 verifies that the `COMPLETE` view still refers to the current readable-region
-start and that the boundary is still available. Callers must not otherwise
-move or modify the bytebuf contents between assembly and consumption; an
-arbitrary same-address in-place overwrite is outside the borrowed-view
-contract, and catching it would require a generation facility this layer
-intentionally does not introduce.
+start under the same readable-view generation epoch, and that the boundary is
+still available. Callers must not otherwise move or modify the bytebuf
+contents between assembly and consumption; an arbitrary same-address in-place
+overwrite is outside the borrowed-view contract.
 
 Appending to the tail between assembly and consumption stays valid, because the
 readable start does not move. `omni_bytebuf_compact()` is never called, so
@@ -1180,10 +1196,11 @@ Persistent consumption state is **0 bytes**, with **no heap allocation**.
 Working memory is O(1): a handful of locals plus one bounded bytebuf consume
 call. On the tested 64-bit Linux ABI,
 `sizeof(struct omni_http_request_consume_result)` is **24 bytes** — one status
-plus two `size_t` counters — and the Task 038 result is **224 bytes** (208 at
-its baseline plus 16 for the source snapshot).
+plus two `size_t` counters — and the Task 038 result is **232 bytes** (208 at
+its baseline plus 24 for the source snapshot pointer, length, and generation
+epoch).
 
-Task 039 validation: `http-request-consume-unit` passes **33,109 checks**. It
+Task 039 validation: `http-request-consume-unit` passes **33,174 checks**. It
 covers NULL/inert/empty-buffer arguments with real and forged results, no-body
 and fixed-length consumption, a binary body containing NUL and high octets,
 trailing non-request bytes, two- and three-request pipelines with exact
@@ -1192,11 +1209,15 @@ important `INCOMPLETE` shape, all six terminal parse/framing errors, double
 consume, an old result aimed at the next pipelined request, compaction and reset
 after assembly, a safe tail append between assembly and consumption, a nonzero
 read offset, explicit no-compaction backing checks, unused-tail sentinels,
-caller-data immutability, five forged-metadata variants, the full
-assemble → inspect → consume → next-region lifecycle, and **1,000 repeated
-assemble/consume cycles** over a repeating pipelined pair with bounded storage
-and a high-water mark of one pair. The full **37/37 native CTest** matrix passes
-in GCC 16.2.1 and Clang 22.1.8 Debug, Release, and Debug ASan+UBSan
-configurations with no sanitizer findings; the network/heap boundary gate
-covers `http_request_consume.c`; and `nm` confirms Task 039 symbols are absent
+caller-data immutability, eight forged-metadata variants (including
+stale-generation and zero-generation snapshots), the six generation-epoch
+alias regressions (consume-to-empty refill, compact alias at the same address,
+reset/refill alias, external partial consume, zero-consume validity, safe tail
+append under the generation check), the full assemble → inspect → consume →
+next-region lifecycle, and **1,000 repeated assemble/consume cycles** over a
+repeating pipelined pair with bounded storage and a high-water mark of one
+pair. The full **37/37 native CTest** matrix passes in GCC 16.2.1 and
+Clang 22.1.8 Debug, Release, and Debug ASan+UBSan configurations with no
+sanitizer findings; the network/heap boundary gate covers
+`http_request_consume.c`; and `nm` confirms Task 039 symbols are absent
 from the production executable, whose version and startup output are unchanged.

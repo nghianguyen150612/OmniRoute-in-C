@@ -20,6 +20,12 @@
  * (read <= write <= capacity) — impossible corruption, not caller-controlled
  * exhaustion or misuse, which fail cleanly with false/NULL. Sanitizers
  * remain the primary validation.
+ *
+ * Readable-view generation: a local uint64_t epoch advanced by every
+ * successful nonzero consume, every compact with read > 0, and reset.
+ * Append/commit and zero-length operations never advance it, so a borrowed
+ * readable view stays valid across tail growth. Unsigned wrap at UINT64_MAX
+ * follows C semantics (documented limitation).
  */
 
 #include "omniroute/bytebuf.h"
@@ -34,6 +40,7 @@ static void mark_inert(struct omni_bytebuf *buf) {
   buf->read = 0;
   buf->write = 0;
   buf->high_water = 0;
+  buf->read_generation = 0;
   buf->owns_backing = false;
   buf->live = false;
 }
@@ -68,6 +75,7 @@ bool omni_bytebuf_init_borrowed(struct omni_bytebuf *buf, void *storage, size_t 
   buf->read = 0;
   buf->write = 0;
   buf->high_water = 0;
+  buf->read_generation = 1u; /* deterministic nonzero live epoch */
   buf->owns_backing = false;
   buf->live = true;
   return true;
@@ -93,6 +101,7 @@ bool omni_bytebuf_init_owned(struct omni_bytebuf *buf, size_t capacity) {
   buf->read = 0;
   buf->write = 0;
   buf->high_water = 0;
+  buf->read_generation = 1u; /* deterministic nonzero live epoch */
   buf->owns_backing = true;
   buf->live = true;
   return true;
@@ -117,6 +126,13 @@ const unsigned char *omni_bytebuf_read_ptr(const struct omni_bytebuf *buf, size_
     return NULL;
   }
   return buf->backing + buf->read;
+}
+
+uint64_t omni_bytebuf_read_generation(const struct omni_bytebuf *buf) {
+  if (buf == NULL || !buf->live) {
+    return 0u;
+  }
+  return buf->read_generation;
 }
 
 unsigned char *omni_bytebuf_write_ptr(struct omni_bytebuf *buf, size_t *out_len) {
@@ -207,6 +223,14 @@ bool omni_bytebuf_consume(struct omni_bytebuf *buf, size_t count) {
     buf->read = 0;
     buf->write = 0;
   }
+  /* Any successful nonzero consume invalidates outstanding readable views,
+   * including the consume-to-empty canonicalization above: the readable
+   * start may return to the same backing address, so pointer identity alone
+   * cannot detect the change. Unsigned wrap at UINT64_MAX follows C
+   * semantics (documented limitation). */
+  if (count > 0u) {
+    buf->read_generation += 1u;
+  }
   return true;
 }
 
@@ -220,6 +244,11 @@ void omni_bytebuf_compact(struct omni_bytebuf *buf) {
   if (buf->read == 0) {
     return; /* already compact (empty included: read == write == 0) */
   }
+  /* read > 0 here: the logical readable placement changes (unread bytes
+   * move, or a drained buffer canonicalizes), so outstanding readable
+   * views are invalidated and the generation advances — even when the
+   * readable start lands back at the same backing address. */
+  buf->read_generation += 1u;
   if (buf->read == buf->write) {
     /* Empty with a consumed prefix: no bytes to move, just canonicalize. */
     buf->read = 0;
@@ -241,9 +270,12 @@ void omni_bytebuf_reset(struct omni_bytebuf *buf) {
   }
   /* Reuse only: backing retained, capacity unchanged, contents kept (no
    * erasure guarantee), high_water keeps its lifetime maximum. Outstanding
-   * zero-copy views invalidate by contract from this point on. */
+   * zero-copy views invalidate by contract from this point on, and the
+   * generation advances so a stale view is rejected even though the
+   * offsets (and possibly the readable start address) return to zero. */
   buf->read = 0;
   buf->write = 0;
+  buf->read_generation += 1u;
 }
 
 void omni_bytebuf_destroy(struct omni_bytebuf *buf) {

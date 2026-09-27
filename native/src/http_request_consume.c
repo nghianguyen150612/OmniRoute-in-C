@@ -46,14 +46,28 @@ struct omni_http_request_consume_result omni_http_request_consume(
     return result;
   }
 
-  /* Stale-result identity: the request's assembly snapshot must name the
-     CURRENT readable start. This rejects a consumed, reset, or compacted
-     buffer, and a second consume of an already-consumed result, because all
-     three move the read offset. A safe tail append leaves the readable start
-     in place, so growth between assembly and consume is still accepted. */
+  /* Stale-result identity, part 1 — pointer: the request's assembly snapshot
+     must name the CURRENT readable start. This rejects a consumed, reset, or
+     compacted buffer, and a second consume of an already-consumed result,
+     because all three move the read offset. A safe tail append leaves the
+     readable start in place, so growth between assembly and consume is still
+     accepted. */
   current = omni_bytebuf_read_ptr(buffer, NULL);
   if (current == NULL || request->source_read_ptr == NULL ||
       current != request->source_read_ptr) {
+    result.status = OMNI_HTTP_REQUEST_CONSUME_ERR_STALE;
+    return result;
+  }
+
+  /* Stale-result identity, part 2 — generation epoch: the pointer alone is
+     not identity. A consume-to-empty canonicalization and a compaction both
+     return the readable start to the same backing address for a DIFFERENT
+     logical region, and a reset/refill can restore the exact old address.
+     The snapshot's recorded epoch must still be the current one; any
+     successful nonzero consume, meaningful compact, or reset advanced it.
+     A live buffer always has a nonzero generation, so a zero snapshot epoch
+     (a fabricated result) can never match here either. */
+  if (omni_bytebuf_read_generation(buffer) != request->source_read_generation) {
     result.status = OMNI_HTTP_REQUEST_CONSUME_ERR_STALE;
     return result;
   }

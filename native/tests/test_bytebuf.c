@@ -48,6 +48,7 @@ struct buf_state {
   size_t writable;
   size_t reclaimable;
   size_t high_water;
+  uint64_t read_generation;
 };
 
 static struct buf_state snapshot(const struct omni_bytebuf *buf) {
@@ -58,13 +59,14 @@ static struct buf_state snapshot(const struct omni_bytebuf *buf) {
   s.writable = omni_bytebuf_writable(buf);
   s.reclaimable = omni_bytebuf_reclaimable(buf);
   s.high_water = omni_bytebuf_high_water(buf);
+  s.read_generation = omni_bytebuf_read_generation(buf);
   return s;
 }
 
 static bool same_state(struct buf_state a, struct buf_state b) {
   return a.capacity == b.capacity && a.readable == b.readable &&
          a.writable == b.writable && a.reclaimable == b.reclaimable &&
-         a.high_water == b.high_water;
+         a.high_water == b.high_water && a.read_generation == b.read_generation;
 }
 
 /* ------------------------------------------------------------------- init */
@@ -587,6 +589,94 @@ static void test_high_water(void) {
   omni_bytebuf_destroy(&buf);
 }
 
+/* ------------------------------------------- readable-view generation epoch */
+
+static void test_read_generation(void) {
+  struct omni_bytebuf buf;
+  struct omni_bytebuf zeroed;
+  unsigned char storage[32];
+  uint64_t gen;
+  uint64_t before;
+
+  memset(&zeroed, 0, sizeof(zeroed));
+  check(omni_bytebuf_read_generation(NULL) == 0u, "generation on NULL is zero");
+  check(omni_bytebuf_read_generation(&zeroed) == 0u, "generation on inert buffer is zero");
+
+  omni_bytebuf_init_borrowed(&buf, storage, sizeof(storage));
+  gen = omni_bytebuf_read_generation(&buf);
+  check(gen == 1u, "live buffer starts at deterministic generation 1");
+
+  /* Tail growth never invalidates the readable view. */
+  before = gen;
+  check(omni_bytebuf_append(&buf, "abcdef", 6u), "generation append succeeds");
+  check(omni_bytebuf_read_generation(&buf) == before, "append leaves generation unchanged");
+  {
+    unsigned char *wptr = omni_bytebuf_write_ptr(&buf, NULL);
+
+    memset(wptr, 0x77, 4u);
+    check(omni_bytebuf_commit(&buf, 4u), "generation commit succeeds");
+  }
+  check(omni_bytebuf_read_generation(&buf) == before, "commit leaves generation unchanged");
+
+  /* Zero-length operations are true no-ops. */
+  check(omni_bytebuf_append(&buf, "x", 0u), "zero append succeeds");
+  check(omni_bytebuf_commit(&buf, 0u), "zero commit succeeds");
+  check(omni_bytebuf_consume(&buf, 0u), "zero consume succeeds");
+  check(omni_bytebuf_read_generation(&buf) == before, "zero-length operations leave generation unchanged");
+
+  /* Failed operations never advance the generation. */
+  check(!omni_bytebuf_append(&buf, "x", sizeof(storage)), "over-capacity append fails");
+  check(!omni_bytebuf_commit(&buf, sizeof(storage)), "over-tail commit fails");
+  check(!omni_bytebuf_consume(&buf, 100u), "over-readable consume fails");
+  check(omni_bytebuf_read_generation(&buf) == before, "failed operations leave generation unchanged");
+
+  /* A successful nonzero consume advances the generation, partial or not. */
+  gen = omni_bytebuf_read_generation(&buf);
+  check(omni_bytebuf_consume(&buf, 3u), "partial consume succeeds");
+  check(omni_bytebuf_read_generation(&buf) == gen + 1u, "partial consume advances generation");
+
+  /* Consume-to-empty advances it too, even though the readable start returns
+     to backing offset zero — the pointer alone cannot detect that change. */
+  gen = omni_bytebuf_read_generation(&buf);
+  check(omni_bytebuf_consume(&buf, 7u), "consume-to-empty succeeds");
+  check(omni_bytebuf_read_generation(&buf) == gen + 1u, "consume-to-empty advances generation");
+  check(omni_bytebuf_readable(&buf) == 0u, "buffer is empty after consume-to-empty");
+
+  /* Compact no-op (read == 0) leaves the generation unchanged. */
+  before = omni_bytebuf_read_generation(&buf);
+  omni_bytebuf_compact(&buf);
+  check(omni_bytebuf_read_generation(&buf) == before, "compact no-op leaves generation unchanged");
+
+  /* Compact that moves unread bytes advances the generation. */
+  omni_bytebuf_append(&buf, "0123456789ABCDEF", 16u);
+  omni_bytebuf_consume(&buf, 10u); /* unread "ABCDEF" at [10,16) */
+  gen = omni_bytebuf_read_generation(&buf);
+  omni_bytebuf_compact(&buf);
+  check(omni_bytebuf_read_generation(&buf) == gen + 1u, "compact moving unread bytes advances generation");
+
+  /* Reset advances the generation even though backing and the zero offsets
+     are retained — outstanding views are stale regardless of address. */
+  omni_bytebuf_append(&buf, "xy", 2u);
+  gen = omni_bytebuf_read_generation(&buf);
+  omni_bytebuf_reset(&buf);
+  check(omni_bytebuf_read_generation(&buf) == gen + 1u, "reset advances generation");
+
+  /* The epoch is monotonic across a mixed sequence: every invalidation
+     counts exactly once, so a stale snapshot can never catch up. */
+  omni_bytebuf_append(&buf, "0123456789", 10u);
+  gen = omni_bytebuf_read_generation(&buf);
+  omni_bytebuf_consume(&buf, 4u);  /* +1: partial consume */
+  omni_bytebuf_compact(&buf);      /* +1: moves unread bytes */
+  omni_bytebuf_consume(&buf, 2u);  /* +1: partial consume */
+  omni_bytebuf_compact(&buf);      /* +1: moves unread bytes */
+  omni_bytebuf_reset(&buf);        /* +1: reset */
+  check(omni_bytebuf_read_generation(&buf) == gen + 5u,
+        "each invalidation advances the epoch exactly once");
+
+  omni_bytebuf_destroy(&buf);
+  check(omni_bytebuf_read_generation(&buf) == 0u, "generation on destroyed buffer is zero");
+}
+
 /* ---------------------------------------------------------- overflow-safe */
 
 static void test_size_max_fails_safely(void) {
@@ -876,6 +966,7 @@ int main(void) {
   test_owned_lifecycle();
   test_repeated_destroy_borrowed();
   test_high_water();
+  test_read_generation();
   test_size_max_fails_safely();
   test_null_and_inert();
   test_deterministic_stress();

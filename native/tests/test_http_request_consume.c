@@ -220,6 +220,9 @@ static void test_basic_no_body_consume(void) {
   check(result.source_read_ptr == omni_bytebuf_read_ptr(&fixture.buffer, NULL),
         "snapshot names the current readable start");
   check(result.source_readable_length == length, "snapshot records the readable length");
+  check(result.source_read_generation == omni_bytebuf_read_generation(&fixture.buffer) &&
+            result.source_read_generation != 0u,
+        "snapshot records the current readable generation");
   check(result.framing.framing == OMNI_HTTP_REQUEST_BODY_NONE, "no-body framing is exposed");
   check(result.body.body.length == 0u, "no-body span is empty");
 
@@ -488,7 +491,8 @@ static void test_incomplete_never_consumes(void) {
     result = assemble(&fixture);
     check(result.status == OMNI_HTTP_REQUEST_INCOMPLETE, "every incomplete case stays INCOMPLETE");
     check(result.consumed_bytes == 0u, "incomplete result exposes no consumable boundary");
-    check(result.source_read_ptr == NULL && result.source_readable_length == 0u,
+    check(result.source_read_ptr == NULL && result.source_readable_length == 0u &&
+              result.source_read_generation == 0u,
           "incomplete result exposes no usable source snapshot");
     consumed = omni_http_request_consume(&fixture.buffer, &result);
     check(consumed.status == OMNI_HTTP_REQUEST_CONSUME_ERR_NOT_COMPLETE,
@@ -550,7 +554,8 @@ static void test_terminal_errors_never_consume(void) {
     result = omni_http_request_assemble(&fixture.buffer, fixture.headers, capacities[i]);
     check(result.status == statuses[i], "terminal error maps to the expected Task 038 status");
     check(result.consumed_bytes == 0u, "terminal error exposes no consumable boundary");
-    check(result.source_read_ptr == NULL && result.source_readable_length == 0u,
+    check(result.source_read_ptr == NULL && result.source_readable_length == 0u &&
+              result.source_read_generation == 0u,
           "terminal error exposes no usable source snapshot");
     consumed = omni_http_request_consume(&fixture.buffer, &result);
     check(consumed.status == OMNI_HTTP_REQUEST_CONSUME_ERR_NOT_COMPLETE,
@@ -712,6 +717,153 @@ static void test_reset_after_assembly_is_rejected(void) {
     check(retry.status == OMNI_HTTP_REQUEST_CONSUME_OK, "fresh request after reset consumes");
     check(retry.consumed_bytes == sizeof(REQ_C) - 1u, "fresh consume is exact after reset");
   }
+  omni_bytebuf_destroy(&fixture.buffer);
+}
+
+/* ----------------------------------- generation-epoch stale-view aliases */
+/*
+ * The pointer-only identity check is insufficient: consume-to-empty and
+ * compact both return the readable start to the same backing address for a
+ * DIFFERENT logical region, and a reset/refill can restore the exact old
+ * address. These regressions prove the readable-view generation epoch
+ * rejects every same-address alias while leaving the valid lifecycle
+ * (safe tail append, zero consume) working.
+ */
+static void test_stale_generation_aliases(void) {
+  unsigned char pipeline[256];
+  struct fixture fixture;
+  struct omni_http_request_result result;
+  struct omni_http_request_consume_result consumed;
+  struct fixture_snapshot snapshot;
+  const size_t first_length = sizeof(REQ_A) - 1u;
+  const size_t second_length = sizeof(REQ_C) - 1u;
+
+  /* 1. Consume-to-empty, then refill: the readable start returns to backing
+     offset zero — the exact address A's snapshot recorded — but it now
+     names request B. */
+  (void)memset(&fixture, 0, sizeof(fixture));
+  check(load_raw(&fixture, REQ_A, first_length), "consume-empty-refill fixture loads A");
+  result = assemble(&fixture);
+  check(result.status == OMNI_HTTP_REQUEST_COMPLETE, "consume-empty-refill A completes");
+  check(result.source_read_ptr == fixture.storage, "A snapshot is at backing offset zero");
+  consumed = omni_http_request_consume(&fixture.buffer, &result);
+  check(consumed.status == OMNI_HTTP_REQUEST_CONSUME_OK, "consume-empty-refill A consumes");
+  check(omni_bytebuf_readable(&fixture.buffer) == 0u, "buffer is canonically empty after A");
+  check(omni_bytebuf_read_ptr(&fixture.buffer, NULL) == NULL, "empty readable view is NULL");
+
+  check(omni_bytebuf_append(&fixture.buffer, REQ_C, second_length), "request B appends after drain");
+  check(omni_bytebuf_read_ptr(&fixture.buffer, NULL) == result.source_read_ptr,
+        "refill restores the exact old readable address (the alias)");
+  check(omni_bytebuf_read_generation(&fixture.buffer) != result.source_read_generation,
+        "but the generation epoch moved on");
+  snapshot = snapshot_fixture(&fixture);
+  consumed = omni_http_request_consume(&fixture.buffer, &result);
+  check(consumed.status == OMNI_HTTP_REQUEST_CONSUME_ERR_STALE,
+        "old A result cannot consume the refilled request at the same address");
+  check(consumed.consumed_bytes == 0u, "same-address stale consume removes nothing");
+  check_unchanged(&fixture, &snapshot, "request B remains untouched by the stale attempt");
+  check(memcmp(fixture.storage, REQ_C, second_length) == 0,
+        "request B is byte-identical after the rejected consume");
+  omni_bytebuf_destroy(&fixture.buffer);
+
+  /* 2. Pipeline then compact with no consumed prefix: after consuming A and
+     compacting, B sits at backing offset zero — A's old snapshot address. */
+  (void)memset(&fixture, 0, sizeof(fixture));
+  (void)memcpy(pipeline, REQ_A, first_length);
+  (void)memcpy(pipeline + first_length, REQ_C, second_length);
+  check(load_raw(&fixture, pipeline, first_length + second_length),
+        "compact-alias fixture loads A+B");
+  result = assemble(&fixture);
+  check(result.status == OMNI_HTTP_REQUEST_COMPLETE, "compact-alias A completes");
+  check(result.source_read_ptr == fixture.storage, "compact-alias A snapshot is at offset zero");
+  consumed = omni_http_request_consume(&fixture.buffer, &result);
+  check(consumed.status == OMNI_HTTP_REQUEST_CONSUME_OK, "compact-alias A consumes");
+  omni_bytebuf_compact(&fixture.buffer);
+  check(fixture.buffer.read == 0u, "compaction moved B to backing offset zero");
+  check(omni_bytebuf_read_ptr(&fixture.buffer, NULL) == result.source_read_ptr,
+        "compaction restored the exact old readable address (the alias)");
+  check(omni_bytebuf_read_generation(&fixture.buffer) != result.source_read_generation,
+        "but the generation epoch advanced");
+  snapshot = snapshot_fixture(&fixture);
+  consumed = omni_http_request_consume(&fixture.buffer, &result);
+  check(consumed.status == OMNI_HTTP_REQUEST_CONSUME_ERR_STALE,
+        "old A result cannot consume compacted B at the same address");
+  check(consumed.consumed_bytes == 0u, "compact-alias stale consume removes nothing");
+  check_unchanged(&fixture, &snapshot, "compacted B remains untouched by the stale attempt");
+  check(memcmp(fixture.storage, REQ_C, second_length) == 0,
+        "compacted B is byte-identical after the rejected consume");
+  omni_bytebuf_destroy(&fixture.buffer);
+
+  /* 3. Reset then refill: reset returns every offset to zero, so a refilled
+     request reuses A's exact snapshot address. */
+  (void)memset(&fixture, 0, sizeof(fixture));
+  check(load_raw(&fixture, REQ_A, first_length), "reset-refill fixture loads A");
+  result = assemble(&fixture);
+  check(result.status == OMNI_HTTP_REQUEST_COMPLETE, "reset-refill A completes");
+  omni_bytebuf_reset(&fixture.buffer);
+  check(omni_bytebuf_readable(&fixture.buffer) == 0u, "reset empties the buffer");
+  check(omni_bytebuf_append(&fixture.buffer, REQ_C, second_length), "request B appends after reset");
+  check(omni_bytebuf_read_ptr(&fixture.buffer, NULL) == result.source_read_ptr,
+        "refill after reset restores the exact old readable address (the alias)");
+  check(omni_bytebuf_read_generation(&fixture.buffer) != result.source_read_generation,
+        "but the generation epoch advanced");
+  snapshot = snapshot_fixture(&fixture);
+  consumed = omni_http_request_consume(&fixture.buffer, &result);
+  check(consumed.status == OMNI_HTTP_REQUEST_CONSUME_ERR_STALE,
+        "old A result cannot consume the reset-refilled request");
+  check(consumed.consumed_bytes == 0u, "reset-refill stale consume removes nothing");
+  check_unchanged(&fixture, &snapshot, "reset-refilled B remains untouched");
+  check(memcmp(fixture.storage, REQ_C, second_length) == 0,
+        "reset-refilled B is byte-identical after the rejected consume");
+  omni_bytebuf_destroy(&fixture.buffer);
+
+  /* 4. External partial consume invalidates the assembled view even though
+     the request bytes themselves are untouched. */
+  (void)memset(&fixture, 0, sizeof(fixture));
+  check(load_raw(&fixture, REQ_A, first_length), "partial-consume fixture loads");
+  result = assemble(&fixture);
+  check(result.status == OMNI_HTTP_REQUEST_COMPLETE, "partial-consume A completes");
+  check(omni_bytebuf_consume(&fixture.buffer, 4u), "external partial consume succeeds");
+  snapshot = snapshot_fixture(&fixture);
+  consumed = omni_http_request_consume(&fixture.buffer, &result);
+  check(consumed.status == OMNI_HTTP_REQUEST_CONSUME_ERR_STALE,
+        "a result assembled before an external partial consume is stale");
+  check(consumed.consumed_bytes == 0u, "partial-consume stale attempt removes nothing");
+  check_unchanged(&fixture, &snapshot, "buffer unchanged after the stale attempt");
+  check(omni_bytebuf_readable(&fixture.buffer) == first_length - 4u,
+        "the externally consumed prefix stays consumed");
+  omni_bytebuf_destroy(&fixture.buffer);
+
+  /* 5. Zero consume is a true no-op: the assembled view stays consumable. */
+  (void)memset(&fixture, 0, sizeof(fixture));
+  check(load_raw(&fixture, REQ_A, first_length), "zero-consume fixture loads");
+  result = assemble(&fixture);
+  check(result.status == OMNI_HTTP_REQUEST_COMPLETE, "zero-consume A completes");
+  check(omni_bytebuf_consume(&fixture.buffer, 0u), "zero consume succeeds as a no-op");
+  check(omni_bytebuf_read_generation(&fixture.buffer) == result.source_read_generation,
+        "zero consume does not advance the generation");
+  consumed = omni_http_request_consume(&fixture.buffer, &result);
+  check(consumed.status == OMNI_HTTP_REQUEST_CONSUME_OK,
+        "zero consume does not invalidate the assembled request");
+  check(consumed.consumed_bytes == first_length, "zero-consume lifecycle consumes exactly A");
+  omni_bytebuf_destroy(&fixture.buffer);
+
+  /* 6. Safe tail append remains valid across the generation check: the
+     readable start AND the epoch are both unchanged by tail growth. */
+  (void)memset(&fixture, 0, sizeof(fixture));
+  check(load_raw(&fixture, REQ_A, first_length), "safe-append generation fixture loads A");
+  result = assemble(&fixture);
+  check(result.status == OMNI_HTTP_REQUEST_COMPLETE, "safe-append A completes");
+  check(omni_bytebuf_append(&fixture.buffer, REQ_C, second_length), "tail append succeeds");
+  check(omni_bytebuf_read_ptr(&fixture.buffer, NULL) == result.source_read_ptr,
+        "tail append leaves the readable start in place");
+  check(omni_bytebuf_read_generation(&fixture.buffer) == result.source_read_generation,
+        "tail append leaves the generation in place");
+  consumed = omni_http_request_consume(&fixture.buffer, &result);
+  check(consumed.status == OMNI_HTTP_REQUEST_CONSUME_OK,
+        "safe tail append still consumes under the generation check");
+  check(consumed.consumed_bytes == first_length, "only A is consumed");
+  check(consumed.remaining_readable_bytes == second_length, "appended B stays readable");
   omni_bytebuf_destroy(&fixture.buffer);
 }
 
@@ -924,6 +1076,25 @@ static void test_inconsistent_metadata_is_rejected(void) {
   check(consumed.consumed_bytes == 0u, "foreign snapshot consumes zero");
   check(omni_bytebuf_readable(&fixture.buffer) == length,
         "a foreign snapshot cannot advance the real request");
+
+  /* A snapshot with the right address but a stale generation epoch: the
+     pointer matches, so only the generation check can reject it. */
+  forged = result;
+  forged.source_read_generation = result.source_read_generation + 1u;
+  consumed = omni_http_request_consume(&fixture.buffer, &forged);
+  check(consumed.status == OMNI_HTTP_REQUEST_CONSUME_ERR_STALE,
+        "a snapshot with a stale generation epoch is rejected");
+  check(consumed.consumed_bytes == 0u, "stale-generation snapshot consumes zero");
+  check(omni_bytebuf_readable(&fixture.buffer) == length,
+        "a stale-generation snapshot cannot advance the real request");
+
+  /* A fabricated COMPLETE result with no generation recorded at all. */
+  forged = result;
+  forged.source_read_generation = 0u;
+  consumed = omni_http_request_consume(&fixture.buffer, &forged);
+  check(consumed.status == OMNI_HTTP_REQUEST_CONSUME_ERR_STALE,
+        "a snapshot with a zero generation epoch is rejected");
+  check(consumed.consumed_bytes == 0u, "zero-generation snapshot consumes zero");
 
   /* Zero-length COMPLETE. */
   forged = result;
@@ -1143,6 +1314,7 @@ int main(void) {
   test_old_result_cannot_consume_next_request();
   test_compaction_after_assembly_is_rejected();
   test_reset_after_assembly_is_rejected();
+  test_stale_generation_aliases();
   test_append_between_assemble_and_consume();
   test_read_offset_nonzero();
   test_no_auto_compaction();
